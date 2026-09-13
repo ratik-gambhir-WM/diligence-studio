@@ -64,6 +64,7 @@ export function externalizeTemplateAssets(
 export function hydrateTemplateAssetSources(
   presentation: NormalizedPresentation,
   templates: TemplateRepository,
+  appId: string,
 ) {
   return {
     ...presentation,
@@ -79,7 +80,7 @@ export function hydrateTemplateAssetSources(
           return element
         }
 
-        const asset = templates.findAsset(reference.templateId, reference.assetId)
+        const asset = templates.findAsset(reference.templateId, reference.assetId, appId)
         if (!asset) {
           throw new ApiError(
             422,

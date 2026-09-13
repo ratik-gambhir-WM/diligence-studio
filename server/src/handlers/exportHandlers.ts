@@ -4,6 +4,7 @@ import path from 'node:path'
 import Busboy from 'busboy'
 import type { RequestHandler } from 'express'
 
+import { parseAppId } from '../appIdentity'
 import { ApiError } from '../errors'
 import type { ExportPowerPointUseCase } from '../services/ExportPowerPointService'
 
@@ -20,7 +21,7 @@ export function createExportHandlers(service: ExportPowerPointUseCase) {
       )
     }
 
-    const result = await service.export(parseJsonBody(request.body))
+    const result = await service.export(parseJsonBody(request.body), parseAppId(request))
     if (response.writableEnded) {
       return
     }
@@ -45,6 +46,7 @@ export function createExportHandlers(service: ExportPowerPointUseCase) {
         parts.target,
         parts.targetFileName,
         parts.insertAfterSlide,
+        parseAppId(request),
       )
       if (response.writableEnded) {
         return

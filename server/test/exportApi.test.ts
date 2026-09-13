@@ -6,6 +6,8 @@ import request from 'supertest'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../src/app'
+import type { ApiRequestLog } from '../src/apiLogging'
+import type { PowerPointCanvasJson } from '../src/lib/import/PowerpointImportTypes'
 import { SqliteTemplateRepository } from '../src/repositories/SqliteTemplateRepository'
 import { ExportPowerPointService } from '../src/services/ExportPowerPointService'
 import { ImportTemplateService } from '../src/services/ImportTemplateService'
@@ -144,6 +146,32 @@ describe('export API', () => {
     expect(JSON.stringify(response.body)).not.toContain('/etc/passwd')
   })
 
+  it('does not resolve another app\'s stored template assets during export', async () => {
+    templates.ensureApp('app-one')
+    templates.ensureApp('app-two')
+    templates.insert(
+      { templateId: 'scoped-template', templateJson: createStoredTemplate() },
+      [{
+        assetId: 'scoped-asset',
+        bytes: Buffer.from([1, 2, 3]),
+        contentType: 'image/png',
+        templateId: 'scoped-template',
+      }],
+      undefined,
+      undefined,
+      'app-one',
+    )
+
+    const response = await request(createTestApp(4096))
+      .post('/api/v1/export')
+      .set('Content-Type', 'application/json')
+      .set('X-App-Id', 'app-two')
+      .send(createCompactPresentation('/import/scoped-template/assets/scoped-asset'))
+      .expect(422)
+
+    expect(response.body.error.code).toBe('template_asset_not_found')
+  })
+
   it('enforces the configured JSON body limit', async () => {
     const app = createTestApp(64)
     const response = await request(app)
@@ -156,6 +184,7 @@ describe('export API', () => {
   })
 
   it('returns an empty 408 response when endpoint work exceeds the request timeout', async () => {
+    const logs: ApiRequestLog[] = []
     const app = createApp({
       exportService: {
         export: async () => {
@@ -165,6 +194,7 @@ describe('export API', () => {
         insert: async () => ({ bytes: new Uint8Array(), fileName: 'late.pptx', warnings: [] }),
       },
       importService: new ImportTemplateService(new LibraryPowerPointConverter(), templates),
+      logger: (entry) => logs.push(entry),
       maxExportJsonBytes: 1024 * 1024,
       maxUploadBytes: 1024,
       requestTimeoutMs: 10,
@@ -178,6 +208,15 @@ describe('export API', () => {
 
     expect(response.headers['x-request-id']).toEqual(expect.any(String))
     expect(response.text).toBe('')
+    expect(logs).toEqual([
+      expect.objectContaining({
+        errorCode: 'request_timeout',
+        level: 'warn',
+        outcome: 'failure',
+        requestId: response.headers['x-request-id'],
+        statusCode: 408,
+      }),
+    ])
   })
 
   it('returns the stable route-not-found envelope with a request ID', async () => {
@@ -201,6 +240,76 @@ describe('export API', () => {
 
     expect(response.headers['x-request-id']).toEqual(expect.any(String))
     expect(response.text).toBe('')
+  })
+
+  it('logs successful and failed requests with their response request IDs', async () => {
+    const logs: ApiRequestLog[] = []
+    const app = createTestApp(1024, (entry) => logs.push(entry))
+
+    const succeeded = await request(app)
+      .get('/api/v1/templates?appId=trace-test')
+      .expect(200)
+    const failed = await request(app)
+      .post('/api/v1/export?appId=trace-test')
+      .set('Content-Type', 'application/json')
+      .send('{')
+      .expect(400)
+
+    expect(logs).toHaveLength(2)
+    expect(logs[0]).toMatchObject({
+      event: 'api_request_completed',
+      level: 'info',
+      method: 'GET',
+      outcome: 'success',
+      path: '/api/v1/templates',
+      requestId: succeeded.headers['x-request-id'],
+      statusCode: 200,
+    })
+    expect(logs[1]).toMatchObject({
+      errorCode: 'invalid_json',
+      errorName: 'ApiError',
+      event: 'api_request_completed',
+      level: 'warn',
+      method: 'POST',
+      outcome: 'failure',
+      path: '/api/v1/export',
+      requestId: failed.headers['x-request-id'],
+      statusCode: 400,
+    })
+    expect(logs.every((entry) => Number.isFinite(entry.durationMs))).toBe(true)
+    expect(logs.every((entry) => !JSON.stringify(entry).includes('trace-test'))).toBe(true)
+  })
+
+  it('logs unexpected failures without exposing the thrown error message', async () => {
+    const logs: ApiRequestLog[] = []
+    const app = createApp({
+      exportService: {
+        export: async () => {
+          throw new TypeError('sensitive provider response')
+        },
+        insert: async () => ({ bytes: new Uint8Array(), fileName: 'unused.pptx', warnings: [] }),
+      },
+      importService: new ImportTemplateService(new LibraryPowerPointConverter(), templates),
+      logger: (entry) => logs.push(entry),
+      maxExportJsonBytes: 1024 * 1024,
+      maxUploadBytes: 1024,
+    })
+
+    await request(app)
+      .post('/api/v1/export')
+      .set('Content-Type', 'application/json')
+      .send(createCompactPresentation())
+      .expect(500)
+
+    expect(logs).toHaveLength(1)
+    expect(logs[0]).toMatchObject({
+      errorCode: 'internal_error',
+      errorName: 'TypeError',
+      level: 'error',
+      outcome: 'failure',
+      statusCode: 500,
+    })
+    expect(JSON.stringify(logs[0])).not.toContain('sensitive provider response')
   })
 
   it('inserts the generated slide into a bounded multipart target deck', async () => {
@@ -251,10 +360,11 @@ describe('export API', () => {
   })
 })
 
-function createTestApp(maxExportJsonBytes: number) {
+function createTestApp(maxExportJsonBytes: number, logger?: (entry: ApiRequestLog) => void) {
   return createApp({
     exportService: new ExportPowerPointService(templates),
     importService: new ImportTemplateService(new LibraryPowerPointConverter(), templates),
+    logger,
     maxExportJsonBytes,
     maxUploadBytes: Math.max(maxExportJsonBytes, 1024 * 1024),
   })
@@ -313,6 +423,24 @@ function createCompactPresentation(imageSource?: string) {
           elements,
         },
       ],
+    },
+  }
+}
+
+function createStoredTemplate(): PowerPointCanvasJson {
+  return {
+    presentation: {
+      preserveElementOrder: true,
+      showBranding: false,
+      slides: [{
+        backgroundColor: 'FFFFFF',
+        elements: [],
+        height: 720,
+        id: 'slide-1',
+        name: 'Stored template',
+        width: 1280,
+      }],
+      title: 'Stored template',
     },
   }
 }

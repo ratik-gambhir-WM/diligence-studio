@@ -45,19 +45,27 @@ export class TemplateApiError extends Error {
 const POWERPOINT_CONTENT_TYPE =
   'application/vnd.openxmlformats-officedocument.presentationml.presentation'
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || '/api/v1').replace(/\/$/u, '')
+const APP_ID = import.meta.env.VITE_APP_ID?.trim() || 'DiligenceStudio_WestMonroe'
+const APP_ID_HEADERS = { 'X-App-Id': APP_ID } as const
 
 export async function listTemplates(
   kind: PickerTemplateKind,
   signal?: AbortSignal,
 ): Promise<PickerTemplateCatalog> {
-  const response = await fetch(apiUrl(`/templates?kind=${encodeURIComponent(kind)}`), { signal })
+  const response = await fetch(apiUrl(`/templates?kind=${encodeURIComponent(kind)}`), {
+    headers: APP_ID_HEADERS,
+    signal,
+  })
   await assertOk(response)
   assertJsonContentType(response)
   return parseCatalog(await response.json())
 }
 
 export async function getTemplate(templateId: string, signal?: AbortSignal) {
-  const response = await fetch(apiUrl(`/templates/${encodeURIComponent(templateId)}`), { signal })
+  const response = await fetch(apiUrl(`/templates/${encodeURIComponent(templateId)}`), {
+    headers: APP_ID_HEADERS,
+    signal,
+  })
   await assertOk(response)
   assertJsonContentType(response)
   return parseCanvasDocument(await response.json())
@@ -65,6 +73,7 @@ export async function getTemplate(templateId: string, signal?: AbortSignal) {
 
 export async function deleteTemplate(templateId: string, signal?: AbortSignal) {
   const response = await fetch(apiUrl(`/templates/${encodeURIComponent(templateId)}`), {
+    headers: APP_ID_HEADERS,
     method: 'DELETE',
     signal,
   })
@@ -81,7 +90,7 @@ export async function importTemplate(
 ): Promise<ImportedTemplate> {
   const response = await fetch(apiUrl(`/import?kind=${encodeURIComponent(kind)}`), {
     body: file,
-    headers: { 'Content-Type': POWERPOINT_CONTENT_TYPE },
+    headers: { ...APP_ID_HEADERS, 'Content-Type': POWERPOINT_CONTENT_TYPE },
     method: 'POST',
     signal,
   })
@@ -106,7 +115,7 @@ export async function batchImportTemplates(
 ): Promise<BatchImportedTemplates> {
   const response = await fetch(apiUrl(`/batchImport?kind=${encodeURIComponent(kind)}`), {
     body: file,
-    headers: { 'Content-Type': POWERPOINT_CONTENT_TYPE },
+    headers: { ...APP_ID_HEADERS, 'Content-Type': POWERPOINT_CONTENT_TYPE },
     method: 'POST',
     signal,
   })
@@ -118,7 +127,7 @@ export async function batchImportTemplates(
 export async function exportPresentation(input: JsonValue, signal?: AbortSignal) {
   const response = await fetch(apiUrl('/export'), {
     body: JSON.stringify(input),
-    headers: { 'Content-Type': 'application/json' },
+    headers: { ...APP_ID_HEADERS, 'Content-Type': 'application/json' },
     method: 'POST',
     signal,
   })
@@ -137,6 +146,7 @@ export async function insertPresentation(
   form.set('target', targetFile, targetFile.name)
   const response = await fetch(apiUrl('/export/insert'), {
     body: form,
+    headers: APP_ID_HEADERS,
     method: 'POST',
     signal,
   })

@@ -22,6 +22,11 @@ untrusted callers.
   `error.requestId`.
 - Unless noted otherwise, successful JSON responses use `Content-Type: application/json`.
 - Template kinds are `diagram` and `commentary`.
+- App-scoped routes accept `X-App-Id` or an `appId` query parameter. IDs use 1-128 letters,
+  numbers, underscores, or hyphens. The legacy fallback is `DiligenceStudio_WestMonroe`.
+- A valid app ID is registered on first use. It scopes template lists, retrieval, previews, assets,
+  deletion, imports, and stored-asset resolution during export. This is namespacing, not caller
+  authentication; a trusted gateway must prevent callers from claiming another app's ID.
 
 The default limits are a 25 MiB PowerPoint upload, a 50 MiB JSON export body, a 10 MiB stored
 preview, and a 30-second request timeout. These can be changed with the server configuration
@@ -52,6 +57,7 @@ single-slide endpoint rejects decks containing anything other than exactly one s
 
 ```sh
 curl --request POST 'http://localhost:43127/api/v1/import?kind=diagram' \
+  --header 'X-App-Id: DiligenceStudio_WestMonroe' \
   --header 'Content-Type: application/vnd.openxmlformats-officedocument.presentationml.presentation' \
   --data-binary @deck.pptx
 ```
@@ -61,11 +67,11 @@ embedded `data:image/...;base64,...` URIs in the response.
 
 Response headers:
 
-- `Location: /api/v1/templates/:templateId`
+- `Location: /api/v1/templates/:templateId?appId=:appId`
 - `X-Template-Id: :templateId`
 - `X-Template-Preview-Status: ready|unavailable`
 - `X-PowerPoint-Warning-Count: <number>`
-- `Link: </api/v1/templates/:templateId/preview>; rel="preview"` when a preview is available
+- `Link: </api/v1/templates/:templateId/preview?appId=:appId>; rel="preview"` when a preview is available
 
 ### Import every slide
 
@@ -115,7 +121,7 @@ The response is `201 Created`:
       "description": "Imported PowerPoint template",
       "slideCount": 1,
       "elementCount": 12,
-      "previewUrl": "/templates/8f0d.../preview"
+      "previewUrl": "/templates/8f0d.../preview?appId=DiligenceStudio_WestMonroe"
     }
   ]
 }
@@ -144,7 +150,7 @@ without a stored preview are excluded.
   "previews": [
     {
       "templateId": "8f0d...",
-      "previewUrl": "/templates/8f0d.../preview",
+      "previewUrl": "/templates/8f0d.../preview?appId=DiligenceStudio_WestMonroe",
       "contentType": "image/png",
       "width": 1600,
       "height": 900,
@@ -166,7 +172,8 @@ not cacheable by shared clients. `GET /api/v1/import/:templateId/assets/:assetId
 image bytes with the asset's content type.
 
 `DELETE /api/v1/templates/:templateId` returns `204 No Content` when deletion succeeds and `404`
-when the template does not exist. Deletion also removes its image assets and preview.
+when the template is unavailable to the app. Deletion removes that app's access; the template and
+its assets are removed when no app can access it.
 
 ### Export a PowerPoint
 
@@ -176,6 +183,7 @@ Send a canvas JSON document as the body:
 
 ```sh
 curl --request POST 'http://localhost:43127/api/v1/export' \
+  --header 'X-App-Id: DiligenceStudio_WestMonroe' \
   --header 'Content-Type: application/json' \
   --data-binary @slide.json \
   --output generated-slide.pptx
@@ -200,6 +208,7 @@ Send `multipart/form-data` with exactly these parts:
 
 ```sh
 curl --request POST 'http://localhost:43127/api/v1/export/insert' \
+  --header 'X-App-Id: DiligenceStudio_WestMonroe' \
   --form 'presentation=<slide.json' \
   --form 'insertAfterSlide=1' \
   --form 'target=@target.pptx;type=application/vnd.openxmlformats-officedocument.presentationml.presentation' \
@@ -228,7 +237,7 @@ Common status and code combinations include:
 
 | Status | Codes | Typical cause |
 | --- | --- | --- |
-| `400` | `invalid_json`, `invalid_template_kind`, `invalid_preview_page`, `invalid_insert_position`, `missing_multipart_field` | Malformed or incomplete request. |
+| `400` | `invalid_app_id`, `conflicting_app_id`, `invalid_json`, `invalid_template_kind`, `invalid_preview_page`, `invalid_insert_position`, `missing_multipart_field` | Malformed or incomplete request. |
 | `404` | `route_not_found`, `template_not_found`, `template_asset_not_found`, `template_preview_not_found` | Resource or route does not exist. |
 | `413` | `payload_too_large`, `embedded_images_too_large` | Configured request or processing limit exceeded. |
 | `415` | `unsupported_media_type`, `unsupported_target_media_type`, `unsupported_content_encoding` | Unsupported content type or compressed body. |

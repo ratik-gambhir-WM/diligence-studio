@@ -5,6 +5,7 @@ implementation under `src/lib`; nothing in this package enters the React/Vite mo
 Uploaded `.pptx` files are OOXML ZIP packages. Their
 compact canvas JSON is stored in SQLite. Imported image bytes are stored separately from the JSON
 as BLOB assets. Template metadata and first-slide PNG previews are stored in dedicated tables.
+Apps are registered in `apps`, and `app_templates` controls which templates each app can access.
 The checked-in diagram and commentary catalog is seeded transactionally and idempotently at startup.
 
 The server uses Node's built-in SQLite module and therefore requires Node.js 22.5 or newer.
@@ -32,7 +33,16 @@ Configuration is read once at startup:
 - `TEMPLATE_PREVIEW_TIMEOUT_MS` defaults to `15000`.
 - `MAX_TEMPLATE_PREVIEW_BYTES` defaults to `10485760` (10 MiB).
 
-Requests time out after 30 seconds. Compressed request bodies are rejected.
+Requests time out after 30 seconds. Compressed request bodies are rejected. Template, import, and
+export requests accept an `X-App-Id` header (or `appId` query parameter) and fall back to
+`DiligenceStudio_WestMonroe` for legacy callers. App IDs provide basic data segregation, not
+authentication.
+
+The server writes one structured JSON log when each request completes or its connection is
+aborted. Logs include the request ID, method, path without its query string, status, duration,
+success/failure outcome, and a sanitized error code/name when available. Use the `X-Request-Id`
+response header to correlate a client-visible result with its server log. Request bodies, headers,
+query strings, app IDs, filenames, error messages, and stack traces are not logged.
 
 The default preview provider launches Chromium headlessly, injects normalized slide JSON before
 the preview page loads, and screenshots only the read-only SVG slide surface. No browser window is
@@ -47,6 +57,7 @@ Import a deck by sending its binary `.pptx` body:
 
 ```sh
 curl --request POST 'http://localhost:43127/api/v1/import?kind=diagram' \
+  --header 'X-App-Id: DiligenceStudio_WestMonroe' \
   --header 'Content-Type: application/vnd.openxmlformats-officedocument.presentationml.presentation' \
   --data-binary @deck.pptx
 ```
@@ -64,6 +75,7 @@ Import a multi-slide deck as one independently stored template JSON per slide wi
 
 ```sh
 curl --request POST 'http://localhost:43127/api/v1/batchImport?kind=diagram' \
+  --header 'X-App-Id: DiligenceStudio_WestMonroe' \
   --header 'Content-Type: application/vnd.openxmlformats-officedocument.presentationml.presentation' \
   --data-binary @deck.pptx
 ```
@@ -99,6 +111,7 @@ Send the same canvas JSON structure to create a PowerPoint file:
 
 ```sh
 curl --request POST http://localhost:43127/api/v1/export \
+  --header 'X-App-Id: DiligenceStudio_WestMonroe' \
   --header 'Content-Type: application/json' \
   --data-binary @slide.json \
   --output generated-slide.pptx
@@ -113,6 +126,7 @@ Insert generated slides into an uploaded target deck with bounded multipart fiel
 
 ```sh
 curl --request POST http://localhost:43127/api/v1/export/insert \
+  --header 'X-App-Id: DiligenceStudio_WestMonroe' \
   --form 'presentation=<slide.json' \
   --form 'insertAfterSlide=1' \
   --form 'target=@target.pptx;type=application/vnd.openxmlformats-officedocument.presentationml.presentation' \
@@ -135,7 +149,9 @@ SQLite uses strict, versioned schema migrations. `templates` stores `template_id
 JSON-validated `template_json TEXT`. `template_assets` stores each image as an `asset_data BLOB`
 under an `asset_id TEXT PRIMARY KEY`, with `template_id` as a foreign key back to `templates`.
 `template_metadata` owns picker metadata and built-in checksums; `template_previews` owns PNG bytes
-and dimensions. Template, metadata, asset, and preview inserts are committed in one transaction.
+and dimensions. `apps` stores the unique app ID, display name, JSON metadata, and first/last-seen
+timestamps; `app_templates` stores app-to-template access. Template, metadata, asset, preview, and
+app-access inserts are committed in one transaction.
 File-backed databases use SQLite WAL
 mode. Existing templates that still contain embedded base64 images or nonpositive canvas
 dimensions are migrated transactionally when they are first retrieved.

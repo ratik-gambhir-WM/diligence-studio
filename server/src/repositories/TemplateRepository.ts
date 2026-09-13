@@ -1,5 +1,18 @@
 import type { PowerPointCanvasJson } from '../lib/import/PowerpointImportTypes'
 
+export type StoredApp = {
+  appId: string
+  createdAt: string
+  displayName: string
+  lastSeenAt: string
+  metadata: Record<string, string>
+}
+
+export type AppRegistration = {
+  displayName?: string
+  metadata?: Record<string, string>
+}
+
 export type StoredTemplate = {
   templateId: string
   templateJson: PowerPointCanvasJson
@@ -54,25 +67,28 @@ export type TemplateInsert = {
 }
 
 export interface TemplateRepository {
-  delete(templateId: string): boolean
-  findAsset(templateId: string, assetId: string): TemplateAsset | undefined
-  findById(templateId: string): StoredTemplate | undefined
-  findByIdWithAssets(templateId: string): StoredTemplateWithAssets | undefined
-  findPreview(templateId: string): StoredTemplatePreview | undefined
+  delete(templateId: string, appId?: string): boolean
+  ensureApp(appId: string, registration?: AppRegistration): StoredApp
+  findApp(appId: string): StoredApp | undefined
+  findAsset(templateId: string, assetId: string, appId?: string): TemplateAsset | undefined
+  findById(templateId: string, appId?: string): StoredTemplate | undefined
+  findByIdWithAssets(templateId: string, appId?: string): StoredTemplateWithAssets | undefined
+  findPreview(templateId: string, appId?: string): StoredTemplatePreview | undefined
   insert(
     template: StoredTemplate,
     assets: readonly TemplateAsset[],
     metadata?: StoredTemplateMetadata,
     preview?: StoredTemplatePreview,
+    appId?: string,
   ): void
-  insertMany(records: readonly TemplateInsert[]): void
-  list(kind?: TemplateKind): StoredTemplateSummary[]
-  listPreviews(limit: number, offset: number): StoredTemplatePreviewPage
+  insertMany(records: readonly TemplateInsert[], appId?: string): void
+  list(kind?: TemplateKind, appId?: string): StoredTemplateSummary[]
+  listPreviews(limit: number, offset: number, appId?: string): StoredTemplatePreviewPage
   upsertBuiltin(
     template: StoredTemplate,
     assets: readonly TemplateAsset[],
     metadata: StoredTemplateMetadata,
     preview: StoredTemplatePreview,
   ): void
-  update(template: StoredTemplate, assets: readonly TemplateAsset[]): void
+  update(template: StoredTemplate, assets: readonly TemplateAsset[], appId?: string): void
 }

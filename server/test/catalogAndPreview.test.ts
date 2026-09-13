@@ -63,6 +63,28 @@ describe('built-in catalog', () => {
     expect(JSON.stringify(commentary)).not.toContain('element-903000.jpg')
     expect(JSON.stringify(commentary)).not.toContain('element-5.png')
   })
+
+  it('registers app metadata and keeps built-in access independently removable', async () => {
+    const repository = new SqliteTemplateRepository(':memory:')
+    repositories.push(repository)
+    await seedBuiltinTemplates(repository)
+
+    repository.ensureApp('Quarry_WestMonroe', {
+      displayName: 'Quarry_WestMonroe',
+      metadata: { projectPath: '/Users/rgambhir/Quarry' },
+    })
+
+    expect(repository.findApp('Quarry_WestMonroe')).toMatchObject({
+      appId: 'Quarry_WestMonroe',
+      displayName: 'Quarry_WestMonroe',
+      metadata: { projectPath: '/Users/rgambhir/Quarry' },
+    })
+    expect(repository.list('diagram', 'Quarry_WestMonroe')).toHaveLength(6)
+    expect(repository.delete('layered-platform', 'Quarry_WestMonroe')).toBe(true)
+    repository.ensureApp('Quarry_WestMonroe')
+    expect(repository.findById('layered-platform', 'Quarry_WestMonroe')).toBeUndefined()
+    expect(repository.findById('layered-platform')).toBeDefined()
+  })
 })
 
 describe('template preview validation', () => {

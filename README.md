@@ -26,7 +26,8 @@ npm run build
 `npm run dev` starts the web app at Vite's local URL and proxies `/api/v1/*` requests to the API at
 `http://127.0.0.1:43127`. `npm run server:dev` starts that API. A production deployment must provide
 the same `/api/v1` reverse-proxy boundary, or set the public `VITE_API_BASE_URL` (including the API
-version path) at build time.
+version path) at build time. The browser sends `VITE_APP_ID` with API calls and defaults to
+`DiligenceStudio_WestMonroe`; set a distinct value for each consuming app.
 The API uses headless Chromium to render imported-template previews from the same SVG model as the
 canvas, so the web app must be reachable at `TEMPLATE_PREVIEW_RENDER_URL` while imports run.
 Package-specific commands

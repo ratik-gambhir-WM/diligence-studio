@@ -27,6 +27,61 @@ afterEach(() => {
 })
 
 describe('import API', () => {
+  it('registers apps and keeps imported templates scoped to their app ID', async () => {
+    const importService = new ImportTemplateService(
+      {
+        convertFile: async () => ({ templateJson: createLegacyTemplate(), warnings: [] }),
+      },
+      templates,
+      () => 'tenant-template',
+      () => 'tenant-asset',
+    )
+    const app = createTestApp(importService, 1024)
+
+    await request(app)
+      .post('/api/v1/import')
+      .set('Content-Type', POWERPOINT_CONTENT_TYPE)
+      .set('X-App-Id', 'app-one')
+      .send(Buffer.from('staged PowerPoint bytes'))
+      .expect(201)
+
+    expect(templates.findApp('app-one')).toMatchObject({
+      appId: 'app-one',
+      displayName: 'app-one',
+      metadata: {},
+    })
+    expect((await request(app)
+      .get('/api/v1/templates')
+      .set('X-App-Id', 'app-one')
+      .expect(200)).body.templates).toEqual([
+      expect.objectContaining({ templateId: 'tenant-template' }),
+    ])
+    expect((await request(app)
+      .get('/api/v1/templates')
+      .set('X-App-Id', 'app-two')
+      .expect(200)).body.templates).toEqual([])
+    await request(app)
+      .get('/api/v1/templates/tenant-template')
+      .set('X-App-Id', 'app-two')
+      .expect(404)
+  })
+
+  it('rejects malformed or conflicting app IDs', async () => {
+    const app = createTestApp(
+      new ImportTemplateService(new LibraryPowerPointConverter(), templates),
+      1024,
+    )
+
+    expect((await request(app)
+      .get('/api/v1/templates')
+      .set('X-App-Id', '../other-app')
+      .expect(400)).body.error.code).toBe('invalid_app_id')
+    expect((await request(app)
+      .get('/api/v1/templates?appId=app-two')
+      .set('X-App-Id', 'app-one')
+      .expect(400)).body.error.code).toBe('conflicting_app_id')
+  })
+
   it('imports every PowerPoint slide as a separate SQLite template', async () => {
     const templateIds = ['batch-template-1', 'batch-template-2', 'batch-template-3']
     const renderedSlideTexts: string[] = []
@@ -166,7 +221,7 @@ describe('import API', () => {
       .expect(201)
 
     expect(imported.headers).toMatchObject({
-      location: '/api/v1/templates/template-123',
+      location: '/api/v1/templates/template-123?appId=DiligenceStudio_WestMonroe',
       'x-powerpoint-warning-count': '1',
       'x-request-id': expect.any(String),
       'x-template-id': 'template-123',
@@ -310,7 +365,7 @@ describe('import API', () => {
       .expect(201)
 
     expect(imported.headers).toMatchObject({
-      link: '</api/v1/templates/commentary-template/preview>; rel="preview"',
+      link: '</api/v1/templates/commentary-template/preview?appId=DiligenceStudio_WestMonroe>; rel="preview"',
       'x-powerpoint-warning-count': '0',
       'x-template-preview-status': 'ready',
     })
@@ -318,7 +373,7 @@ describe('import API', () => {
     expect((await request(app).get('/api/v1/templates?kind=commentary').expect(200)).body).toEqual({
       templates: [expect.objectContaining({
         kind: 'commentary',
-        previewUrl: '/templates/commentary-template/preview',
+        previewUrl: '/templates/commentary-template/preview?appId=DiligenceStudio_WestMonroe',
         templateId: 'commentary-template',
       })],
     })
@@ -404,7 +459,7 @@ describe('import API', () => {
       contentType: 'image/png',
       dataUrl: ONE_PIXEL_PNG,
       height: 1,
-      previewUrl: '/templates/preview-template-12/preview',
+      previewUrl: '/templates/preview-template-12/preview?appId=DiligenceStudio_WestMonroe',
       templateId: 'preview-template-12',
       width: 1,
     })

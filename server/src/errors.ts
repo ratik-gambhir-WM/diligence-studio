@@ -1,5 +1,7 @@
 import type { ErrorRequestHandler, Request, Response } from 'express'
 
+import { recordApiError } from './apiLogging'
+
 export class ApiError extends Error {
   constructor(
     readonly status: number,
@@ -8,6 +10,7 @@ export class ApiError extends Error {
     options?: ErrorOptions,
   ) {
     super(message, options)
+    this.name = 'ApiError'
   }
 }
 
@@ -17,12 +20,13 @@ type ParserError = Error & {
 }
 
 export const errorHandler: ErrorRequestHandler = (error: unknown, _request, response, next) => {
+  const apiError = toApiError(error)
+  recordApiError(response, apiError.code, error)
   if (response.headersSent) {
     next(error)
     return
   }
 
-  const apiError = toApiError(error)
   response.status(apiError.status).json({
     error: {
       code: apiError.code,
@@ -33,6 +37,7 @@ export const errorHandler: ErrorRequestHandler = (error: unknown, _request, resp
 }
 
 export function notFoundHandler(_request: Request, response: Response) {
+  recordApiError(response, 'route_not_found')
   response.status(404).json({
     error: {
       code: 'route_not_found',

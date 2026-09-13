@@ -25,18 +25,21 @@ describe('template API client', () => {
         description: 'Description',
         slideCount: 1,
         elementCount: 3,
-        previewUrl: '/templates/template-1/preview',
+        previewUrl: '/templates/template-1/preview?appId=DiligenceStudio_WestMonroe',
       }],
     }))
     vi.stubGlobal('fetch', fetchMock)
 
     await expect(listTemplates('diagram')).resolves.toEqual({
       templates: [expect.objectContaining({
-        previewUrl: '/api/v1/templates/template-1/preview',
+        previewUrl: '/api/v1/templates/template-1/preview?appId=DiligenceStudio_WestMonroe',
         templateId: 'template-1',
       })],
     })
-    expect(fetchMock).toHaveBeenCalledWith('/api/v1/templates?kind=diagram', { signal: undefined })
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/templates?kind=diagram', {
+      headers: { 'X-App-Id': 'DiligenceStudio_WestMonroe' },
+      signal: undefined,
+    })
   })
 
   it('rejects malformed catalog and canvas responses', async () => {
@@ -46,7 +49,10 @@ describe('template API client', () => {
 
     await expect(listTemplates('diagram')).rejects.toBeInstanceOf(TemplateApiError)
     await expect(getTemplate('template-1')).rejects.toMatchObject({ code: 'invalid_api_response' })
-    expect(fetch).toHaveBeenNthCalledWith(2, '/api/v1/templates/template-1', { signal: undefined })
+    expect(fetch).toHaveBeenNthCalledWith(2, '/api/v1/templates/template-1', {
+      headers: { 'X-App-Id': 'DiligenceStudio_WestMonroe' },
+      signal: undefined,
+    })
   })
 
   it('returns the imported template ID and preview status from headers', async () => {
@@ -71,7 +77,10 @@ describe('template API client', () => {
     })
     expect(fetchMock).toHaveBeenCalledWith('/api/v1/import?kind=commentary', {
       body: file,
-      headers: { 'Content-Type': 'application/vnd.openxmlformats-officedocument.presentationml.presentation' },
+      headers: {
+        'Content-Type': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        'X-App-Id': 'DiligenceStudio_WestMonroe',
+      },
       method: 'POST',
       signal: undefined,
     })
@@ -107,7 +116,10 @@ describe('template API client', () => {
     })
     expect(fetchMock).toHaveBeenCalledWith('/api/v1/batchImport?kind=diagram', {
       body: file,
-      headers: { 'Content-Type': 'application/vnd.openxmlformats-officedocument.presentationml.presentation' },
+      headers: {
+        'Content-Type': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        'X-App-Id': 'DiligenceStudio_WestMonroe',
+      },
       method: 'POST',
       signal: undefined,
     })
@@ -130,6 +142,7 @@ describe('template API client', () => {
 
     await expect(deleteTemplate('template/one')).resolves.toBeUndefined()
     expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/v1/templates/template%2Fone', {
+      headers: { 'X-App-Id': 'DiligenceStudio_WestMonroe' },
       method: 'DELETE',
       signal: undefined,
     })
@@ -151,12 +164,13 @@ describe('template API client', () => {
 
     expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/v1/export', {
       body: JSON.stringify(presentation),
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-App-Id': 'DiligenceStudio_WestMonroe' },
       method: 'POST',
       signal: undefined,
     })
     expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/v1/export/insert', {
       body: expect.any(FormData),
+      headers: { 'X-App-Id': 'DiligenceStudio_WestMonroe' },
       method: 'POST',
       signal: undefined,
     })

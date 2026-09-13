@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
+import { buildAppScopedPath, DEFAULT_APP_ID } from '../appIdentity'
 import { ApiError } from '../errors'
 import type {
   PowerPointCanvasElement,
@@ -76,7 +77,13 @@ export class ImportService {
     private readonly previewGenerator: TemplatePreviewGenerator = new DisabledTemplatePreviewGenerator(),
   ) {}
 
-  async import(source: Buffer, kind: TemplateKind = 'diagram', signal?: AbortSignal) {
+  async import(
+    source: Buffer,
+    kind: TemplateKind = 'diagram',
+    signal?: AbortSignal,
+    appId: string = DEFAULT_APP_ID,
+  ) {
+    this.templates.ensureApp(appId)
     const workingDirectory = await mkdtemp(path.join(tmpdir(), 'diligence-studio-import-'))
     const inputPath = path.join(workingDirectory, 'upload.pptx')
     const outputPath = path.join(workingDirectory, 'upload.canvas.json')
@@ -127,6 +134,7 @@ export class ImportService {
           templateId,
         },
         preview ? { ...preview, templateId } : undefined,
+        appId,
       )
 
       return {
@@ -147,7 +155,9 @@ export class ImportService {
     source: Buffer,
     kind: TemplateKind = 'diagram',
     signal?: AbortSignal,
+    appId: string = DEFAULT_APP_ID,
   ): Promise<BatchImportResponse> {
+    this.templates.ensureApp(appId)
     const workingDirectory = await mkdtemp(path.join(tmpdir(), 'diligence-studio-batch-import-'))
     const inputPath = path.join(workingDirectory, 'upload.pptx')
     const outputPath = path.join(workingDirectory, 'upload.canvas.json')
@@ -226,15 +236,16 @@ export class ImportService {
         })
       }
 
-      this.templates.insertMany(records)
+      this.templates.insertMany(records, appId)
       return { templates, warnings }
     } finally {
       await rm(workingDirectory, { force: true, recursive: true })
     }
   }
 
-  find(templateId: string) {
-    const storedTemplate = this.templates.findByIdWithAssets(templateId)
+  find(templateId: string, appId: string = DEFAULT_APP_ID) {
+    this.templates.ensureApp(appId)
+    const storedTemplate = this.templates.findByIdWithAssets(templateId, appId)
     if (!storedTemplate) {
       return undefined
     }
@@ -249,7 +260,7 @@ export class ImportService {
     let assets = storedTemplate.assets
     if (repaired.repaired || externalized.assets.length > 0) {
       assets = [...assets, ...externalized.assets]
-      this.templates.update({ templateId, templateJson }, externalized.assets)
+      this.templates.update({ templateId, templateJson }, externalized.assets, appId)
     }
 
     return {
@@ -258,20 +269,25 @@ export class ImportService {
     }
   }
 
-  findAsset(templateId: string, assetId: string) {
-    return this.templates.findAsset(templateId, assetId)
+  findAsset(templateId: string, assetId: string, appId: string = DEFAULT_APP_ID) {
+    this.templates.ensureApp(appId)
+    return this.templates.findAsset(templateId, assetId, appId)
   }
 
-  findPreview(templateId: string) {
-    return this.templates.findPreview(templateId)
+  findPreview(templateId: string, appId: string = DEFAULT_APP_ID) {
+    this.templates.ensureApp(appId)
+    return this.templates.findPreview(templateId, appId)
   }
 
-  list(kind?: TemplateKind): TemplateListResponse {
+  list(kind?: TemplateKind, appId: string = DEFAULT_APP_ID): TemplateListResponse {
+    this.templates.ensureApp(appId)
     return {
-      templates: this.templates.list(kind).map(({ metadata, previewAvailable, templateId, templateJson }) => ({
+      templates: this.templates.list(kind, appId).map(({ metadata, previewAvailable, templateId, templateJson }) => ({
         description: metadata.description,
         kind: metadata.kind,
-        previewUrl: previewAvailable ? `/templates/${templateId}/preview` : null,
+        previewUrl: previewAvailable
+          ? buildAppScopedPath(`/templates/${templateId}/preview`, appId)
+          : null,
         templateId,
         title: templateJson.presentation.title,
         slideCount: templateJson.presentation.slides.length,
@@ -283,9 +299,14 @@ export class ImportService {
     }
   }
 
-  listPreviews(page: number): TemplatePreviewListResponse {
+  listPreviews(page: number, appId: string = DEFAULT_APP_ID): TemplatePreviewListResponse {
+    this.templates.ensureApp(appId)
     const offset = (page - 1) * TEMPLATE_PREVIEW_PAGE_SIZE
-    const { previews, total } = this.templates.listPreviews(TEMPLATE_PREVIEW_PAGE_SIZE, offset)
+    const { previews, total } = this.templates.listPreviews(
+      TEMPLATE_PREVIEW_PAGE_SIZE,
+      offset,
+      appId,
+    )
 
     return {
       pagination: {
@@ -300,15 +321,16 @@ export class ImportService {
         contentType,
         dataUrl: `data:${contentType};base64,${bytes.toString('base64')}`,
         height,
-        previewUrl: `/templates/${templateId}/preview`,
+        previewUrl: buildAppScopedPath(`/templates/${templateId}/preview`, appId),
         templateId,
         width,
       })),
     }
   }
 
-  delete(templateId: string) {
-    return this.templates.delete(templateId)
+  delete(templateId: string, appId: string = DEFAULT_APP_ID) {
+    this.templates.ensureApp(appId)
+    return this.templates.delete(templateId, appId)
   }
 }
 

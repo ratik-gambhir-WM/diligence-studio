@@ -1,5 +1,6 @@
 import { createServer } from 'node:http'
 
+import { writeApiLogToConsole } from './apiLogging'
 import { createApp } from './app'
 import { seedBuiltinTemplates } from './catalog/seedBuiltinTemplates'
 import { loadServerConfig } from './config'
@@ -40,6 +41,7 @@ const importService = new ImportService(
 const server = createServer(createApp({
   exportService,
   importService,
+  logger: writeApiLogToConsole,
   maxExportJsonBytes: config.maxExportJsonBytes,
   maxUploadBytes: config.maxUploadBytes,
   requestTimeoutMs: config.requestTimeoutMs,

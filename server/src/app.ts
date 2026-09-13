@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 
 import express from 'express'
 
+import { createApiLoggingMiddleware, recordApiError, type ApiLogger } from './apiLogging'
 import { API_V1_PATH } from './apiPaths'
 import { ApiError, errorHandler, notFoundHandler } from './errors'
 import { createExportRouter } from './routes/exportRoutes'
@@ -15,6 +16,7 @@ export type AppDependencies = {
   importService: ImportService
   maxExportJsonBytes: number
   maxUploadBytes: number
+  logger?: ApiLogger
   requestTimeoutMs?: number
 }
 
@@ -31,6 +33,9 @@ export function createApp(dependencies: AppDependencies) {
     response.setHeader('X-Request-Id', requestId)
     next()
   })
+  if (dependencies.logger) {
+    app.use(createApiLoggingMiddleware(dependencies.logger))
+  }
   app.use((request, response, next) => {
     const contentEncoding = request.get('Content-Encoding')
     if (contentEncoding && contentEncoding.toLowerCase() !== 'identity') {
@@ -43,6 +48,7 @@ export function createApp(dependencies: AppDependencies) {
 
     response.setTimeout(dependencies.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS, () => {
       if (!response.headersSent) {
+        recordApiError(response, 'request_timeout')
         response.status(408).end()
       }
     })

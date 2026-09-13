@@ -156,7 +156,10 @@ describe('TemplatePicker', () => {
     await screen.findByRole('heading', { name: 'First imported template' })
     expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/v1/batchImport?kind=diagram', {
       body: file,
-      headers: { 'Content-Type': 'application/vnd.openxmlformats-officedocument.presentationml.presentation' },
+      headers: {
+        'Content-Type': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        'X-App-Id': 'DiligenceStudio_WestMonroe',
+      },
       method: 'POST',
       signal: expect.any(AbortSignal),
     })
@@ -196,6 +199,7 @@ describe('TemplatePicker', () => {
       'Delete “First template”? This cannot be undone.',
     )
     expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/v1/templates/first-template', {
+      headers: { 'X-App-Id': 'DiligenceStudio_WestMonroe' },
       method: 'DELETE',
       signal: expect.any(AbortSignal),
     })

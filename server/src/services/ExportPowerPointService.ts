@@ -3,6 +3,7 @@ import {
   buildThemedPptxBytes,
   normalizePresentationSpec,
 } from '../lib/export/PowerpointGenerator'
+import { DEFAULT_APP_ID } from '../appIdentity'
 import type {
   NormalizedPresentation,
 } from '../lib/shared/PowerpointTypes'
@@ -24,19 +25,21 @@ export type ExportedPowerPoint = {
 }
 
 export interface ExportPowerPointUseCase {
-  export(input: unknown): Promise<ExportedPowerPoint>
+  export(input: unknown, appId?: string): Promise<ExportedPowerPoint>
   insert(
     input: unknown,
     targetDeck: Buffer,
     targetFileName: string,
     insertAfterSlide: number,
+    appId?: string,
   ): Promise<ExportedPowerPoint>
 }
 
 export class ExportService implements ExportPowerPointUseCase {
   constructor(private readonly templates: TemplateRepository) {}
 
-  async export(input: unknown): Promise<ExportedPowerPoint> {
+  async export(input: unknown, appId: string = DEFAULT_APP_ID): Promise<ExportedPowerPoint> {
+    this.templates.ensureApp(appId)
     assertBoundedJsonValue(input)
     const normalized = normalizePresentation(input)
     const { presentation, issues } = normalizePresentationSpec(normalized.templateJson)
@@ -50,7 +53,7 @@ export class ExportService implements ExportPowerPointUseCase {
       )
     }
 
-    const hydratedPresentation = hydrateTemplateAssetSources(presentation, this.templates)
+    const hydratedPresentation = hydrateTemplateAssetSources(presentation, this.templates, appId)
     validateImageSources(hydratedPresentation)
     const bytes = await buildThemedPptxBytes(hydratedPresentation)
 
@@ -66,6 +69,7 @@ export class ExportService implements ExportPowerPointUseCase {
     targetDeck: Buffer,
     targetFileName: string,
     insertAfterSlide: number,
+    appId: string = DEFAULT_APP_ID,
   ): Promise<ExportedPowerPoint> {
     if (!Number.isSafeInteger(insertAfterSlide) || insertAfterSlide < 0) {
       throw new ApiError(
@@ -76,7 +80,7 @@ export class ExportService implements ExportPowerPointUseCase {
     }
     try {
       validatePowerPointPackage(targetDeck)
-      const generated = await this.export(input)
+      const generated = await this.export(input, appId)
       const inserted = await insertPptxBytesIntoExistingDeck(
         generated.bytes,
         targetDeck,

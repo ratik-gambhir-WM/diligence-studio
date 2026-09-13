@@ -1,6 +1,7 @@
 import type { Request, RequestHandler, Response } from 'express'
 
 import { API_V1_PATH } from '../apiPaths'
+import { buildAppScopedPath, parseAppId } from '../appIdentity'
 import { ApiError } from '../errors'
 import type { TemplateKind } from '../repositories/TemplateRepository'
 import {
@@ -12,23 +13,27 @@ export function createImportHandlers(service: ImportService) {
   const create: RequestHandler = async (request, response) => {
     validatePowerPointRequest(request)
 
+    const appId = parseAppId(request)
     const kind = parseTemplateKind(request.query.kind, true)
     const result = await runCancellableImport(
       request,
       response,
-      (signal) => service.import(request.body, kind, signal),
+      (signal) => service.import(request.body, kind, signal, appId),
     )
     if (response.writableEnded) {
       return
     }
     response.status(201).set({
-      Location: `${API_V1_PATH}/templates/${result.templateId}`,
+      Location: buildAppScopedPath(`${API_V1_PATH}/templates/${result.templateId}`, appId),
       'X-PowerPoint-Warning-Count': String(result.warnings.length),
       'X-Template-Id': result.templateId,
       'X-Template-Preview-Status': result.previewAvailable ? 'ready' : 'unavailable',
     })
     if (result.previewAvailable) {
-      response.set('Link', `<${API_V1_PATH}/templates/${result.templateId}/preview>; rel="preview"`)
+      response.set('Link', `<${buildAppScopedPath(
+        `${API_V1_PATH}/templates/${result.templateId}/preview`,
+        appId,
+      )}>; rel="preview"`)
     }
     response.json(result.templateJson)
   }
@@ -36,11 +41,12 @@ export function createImportHandlers(service: ImportService) {
   const batchCreate: RequestHandler = async (request, response) => {
     validatePowerPointRequest(request)
 
+    const appId = parseAppId(request)
     const kind = parseTemplateKind(request.query.kind, true)
     const result = await runCancellableImport(
       request,
       response,
-      (signal) => service.batchImport(request.body, kind, signal),
+      (signal) => service.batchImport(request.body, kind, signal, appId),
     )
     if (response.writableEnded) {
       return
@@ -52,7 +58,7 @@ export function createImportHandlers(service: ImportService) {
   }
 
   const find: RequestHandler<{ templateId: string }> = (request, response) => {
-    const template = service.find(request.params.templateId)
+    const template = service.find(request.params.templateId, parseAppId(request))
     if (!template) {
       throw new ApiError(404, 'template_not_found', 'The requested template does not exist.')
     }
@@ -60,7 +66,11 @@ export function createImportHandlers(service: ImportService) {
   }
 
   const findAsset: RequestHandler<{ assetId: string; templateId: string }> = (request, response) => {
-    const asset = service.findAsset(request.params.templateId, request.params.assetId)
+    const asset = service.findAsset(
+      request.params.templateId,
+      request.params.assetId,
+      parseAppId(request),
+    )
     if (!asset) {
       throw new ApiError(404, 'template_asset_not_found', 'The requested template image does not exist.')
     }
@@ -76,21 +86,25 @@ export function createImportHandlers(service: ImportService) {
       .send(asset.bytes)
   }
 
-  const list: RequestHandler = (_request, response) => {
-    response.json(service.list(parseTemplateKind(_request.query.kind, false)))
+  const list: RequestHandler = (request, response) => {
+    response.json(service.list(
+      parseTemplateKind(request.query.kind, false),
+      parseAppId(request),
+    ))
   }
 
   const listPreviews: RequestHandler = (request, response) => {
     response
       .set('Cache-Control', 'private, no-store')
-      .json(service.listPreviews(parsePreviewPage(request.query.page)))
+      .json(service.listPreviews(parsePreviewPage(request.query.page), parseAppId(request)))
   }
 
   const findPreview: RequestHandler<{ templateId: string }> = (request, response) => {
-    if (!service.find(request.params.templateId)) {
+    const appId = parseAppId(request)
+    if (!service.find(request.params.templateId, appId)) {
       throw new ApiError(404, 'template_not_found', 'The requested template does not exist.')
     }
-    const preview = service.findPreview(request.params.templateId)
+    const preview = service.findPreview(request.params.templateId, appId)
     if (!preview) {
       throw new ApiError(404, 'template_preview_not_found', 'The requested template preview does not exist.')
     }
@@ -103,7 +117,7 @@ export function createImportHandlers(service: ImportService) {
   }
 
   const remove: RequestHandler<{ templateId: string }> = (request, response) => {
-    if (!service.delete(request.params.templateId)) {
+    if (!service.delete(request.params.templateId, parseAppId(request))) {
       throw new ApiError(404, 'template_not_found', 'The requested template does not exist.')
     }
     response.sendStatus(204)
