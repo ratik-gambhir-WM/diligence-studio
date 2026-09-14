@@ -4,7 +4,8 @@ The diligence-studio server exposes a versioned HTTP API for importing PowerPoin
 browsing stored templates and previews, exporting canvas JSON to PowerPoint, and inserting
 generated slides into an existing deck.
 
-The API is served beneath `/api/v1`. The local development server listens on
+The existing API is served beneath `/api/v1`; asynchronous classified import is the single v2
+endpoint. The local development server listens on
 `http://127.0.0.1:43127` by default. The Vite development server proxies `/api/v1` to that
 address.
 
@@ -36,6 +37,7 @@ documented in [`server/README.md`](../../server/README.md).
 
 | Method | Path | Purpose |
 | --- | --- | --- |
+| `POST` | `/api/v2/import?kind=...` | Import one slide and atomically create pending retrieval work. |
 | `POST` | `/api/v1/import?kind=...` | Import a single-slide PowerPoint as one template. |
 | `POST` | `/api/v1/batchImport?kind=...` | Import every slide as a separate template. |
 | `GET` | `/api/v1/templates?kind=...` | List template metadata. |
@@ -104,6 +106,26 @@ The response is `201 Created`:
 ```
 
 `X-Imported-Template-Count` and `X-PowerPoint-Warning-Count` report the aggregate result.
+
+### Import one slide for retrieval indexing
+
+`POST /api/v2/import?kind=diagram` uses the same content type, app scope, upload limit, compressed
+body rejection, and exactly-one-slide rule as v1. Its `201 Created` body is an envelope:
+
+```json
+{
+  "previewAvailable": true,
+  "templateId": "8f0d...",
+  "templateJson": { "presentation": {} },
+  "warnings": [],
+  "retrieval": { "status": "pending" }
+}
+```
+
+`retrieval.status` confirms durable work was committed; it does not mean classification has begun.
+The endpoint returns before classification and embedding. No public v2 read, query, status, retry,
+classification, embedding, batch-import, or backfill route exists. Existing v1 imports never create
+this work.
 
 ### List templates
 

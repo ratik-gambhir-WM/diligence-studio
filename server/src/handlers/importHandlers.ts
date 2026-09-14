@@ -57,6 +57,24 @@ export function createImportHandlers(service: ImportService) {
     }).json(result)
   }
 
+  const createV2: RequestHandler = async (request, response) => {
+    validatePowerPointRequest(request)
+    const appId = parseAppId(request)
+    const kind = parseTemplateKind(request.query.kind, true)
+    const result = await runCancellableImport(
+      request,
+      response,
+      (signal) => service.importV2(request.body, kind, signal, appId),
+    )
+    if (response.writableEnded) return
+    response.status(201).set({
+      Location: buildAppScopedPath(`${API_V1_PATH}/templates/${result.templateId}`, appId),
+      'X-PowerPoint-Warning-Count': String(result.warnings.length),
+      'X-Template-Id': result.templateId,
+      'X-Template-Preview-Status': result.previewAvailable ? 'ready' : 'unavailable',
+    }).json(result)
+  }
+
   const find: RequestHandler<{ templateId: string }> = (request, response) => {
     const template = service.find(request.params.templateId, parseAppId(request))
     if (!template) {
@@ -123,7 +141,7 @@ export function createImportHandlers(service: ImportService) {
     response.sendStatus(204)
   }
 
-  return { batchCreate, create, find, findAsset, findPreview, list, listPreviews, remove }
+  return { batchCreate, create, createV2, find, findAsset, findPreview, list, listPreviews, remove }
 }
 
 function validatePowerPointRequest(request: Request) {

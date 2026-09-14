@@ -1,12 +1,13 @@
-# Slide Classification and Agent Retrieval Plan
+# Slide Classification and Agent Retrieval Through Import v2 Plan
 
 ## Goal
 
-For the first rollout, classify only templates created through the single-slide import path with an
-OpenAI model, persist validated `SlideRetrievalMetadata`, embed a canonical text representation of
-that metadata, and expose it through a flexible `query_slides` tool. A future OpenAI Agents SDK
-agent should be able to pull different metadata views, search lexically or semantically, discover
-facets, find similar slides, and then load the selected canvas JSON with `get_slide`.
+For the first rollout, add exactly one new public endpoint: `POST /api/v2/import`. It accepts one
+single-slide PowerPoint, persists the template, and atomically creates durable asynchronous
+classification work. A server worker classifies the slide with an OpenAI model, persists validated
+`SlideRetrievalMetadata`, and embeds a canonical text representation of that metadata. A future
+OpenAI Agents SDK agent can access the stored index through internal `query_slides` and `get_slide`
+tools; the pilot does not add a public HTTP query, classification, status, retry, or backfill route.
 
 Classification and embedding belong in the server because they use an API key and validated stored
 template data. Exact, lexical, facet, ID, and stored-vector similarity queries remain local;
@@ -16,9 +17,11 @@ browser adapter in `web/src/lib/OpenAI.ts`.
 
 ## Assumptions and decisions
 
-- A stored template represents one retrievable slide. The first rollout hooks only
-  `ImportService.import`; `ImportService.batchImport`, built-in seeding, and existing-template
-  backfill remain unchanged until the pilot is evaluated.
+- A stored template represents one retrievable slide. The first rollout creates a separate v2 use
+  case reached only through `POST /api/v2/import`. Existing v1 import, batch import, built-in
+  seeding, and existing-template backfill remain unchanged until the pilot is evaluated.
+- `POST /api/v2/import` is the only new public endpoint in this plan. Retrieval is exposed only to
+  a trusted in-process Agent tool adapter; it is not mirrored as an HTTP route.
 - Classification runs asynchronously after template persistence. Import success must not depend on
   OpenAI availability, latency, classification output quality, or embedding availability.
 - Each slide is classified independently. This keeps retries, provenance, failure isolation, and
@@ -44,6 +47,8 @@ browser adapter in `web/src/lib/OpenAI.ts`.
 
 - `ImportService.import` already normalizes one slide, generates a preview, externalizes images,
   and inserts template data transactionally.
+- `POST /api/v1/import` and `POST /api/v1/batchImport` are existing contracts. The v2 rollout must
+  not change their request, response, persistence side effects, or failure behavior.
 - `ImportService.batchImport` already splits a deck into independent one-slide templates and inserts
   the complete batch atomically.
 - `SqliteTemplateRepository` is at schema version 3 and owns templates, metadata, previews, assets,
@@ -64,8 +69,8 @@ browser adapter in `web/src/lib/OpenAI.ts`.
 
 ```mermaid
 flowchart LR
-    IMPORT["Single-slide import only"] --> STORE["Store template, assets, preview"]
-    BATCH["Batch import"] --> UNCHANGED["Existing behavior; no classification yet"]
+    IMPORT["POST /api/v2/import"] --> STORE["Store template, assets, preview"]
+    V1["Existing v1 import and batch routes"] --> UNCHANGED["Existing behavior; no classification"]
     STORE --> PENDING["Persist pending classification"]
     PENDING --> WORKER["Bounded classification worker"]
     WORKER --> DIGEST["Build redacted bounded slide digest"]
@@ -78,7 +83,7 @@ flowchart LR
     EMBED --> VECTOR["Validated vector in SQLite"]
     META --> FTS["SQLite FTS5 search index"]
 
-    AGENT["OpenAI Agents SDK agent"] --> QUERY["query_slides tool"]
+    AGENT["Trusted OpenAI Agents SDK runtime"] --> QUERY["Internal query_slides tool"]
     QUERY --> SEARCH["SlideRetrievalService.query"]
     SEARCH --> META
     SEARCH --> FTS
@@ -91,10 +96,11 @@ flowchart LR
 The critical separation is:
 
 ```text
-classification: single import -> template + preview -> model call -> validated metadata
+ingress:        POST /api/v2/import -> template + preview + durable pending work
+classification: pending work -> model call -> validated metadata
 indexing:       metadata -> canonical retrieval document -> embedding -> SQLite
-retrieval:      query mode + filters + projection -> stored metadata candidates
-loading:        selected template ID -> existing hydrated canvas JSON
+retrieval:      internal Agent tool -> query mode + filters + projection -> stored candidates
+loading:        internal Agent tool -> selected template ID -> hydrated canvas JSON
 ```
 
 Classification is never repeated during retrieval. Only `semantic` and `hybrid` text queries make
@@ -414,7 +420,8 @@ remove the FTS row because a virtual table should not be assumed to follow the f
 
 Store the embedding as a little-endian Float32 BLOB. On write and read, validate its byte length
 against `embedding_dimensions`, require finite values, and reject a zero-norm vector. The current
-catalog is small, so v1 may compute cosine similarity in the server over app-scoped, facet-filtered
+catalog is small, so the pilot may compute cosine similarity in the server over app-scoped,
+facet-filtered
 rows. This avoids pretending FTS5 is a vector index or adding an unverified SQLite extension. Add a
 measured scale threshold to the runbook; if latency exceeds it, evaluate a supported local vector
 extension or dedicated vector store as a separate migration.
@@ -442,8 +449,8 @@ Migration and pilot behavior:
 
 1. Create the tables and indexes without creating pending work for existing templates.
 2. Do not call OpenAI from the migration transaction.
-3. Only `ImportService.import` creates a pending classification record. Batch import, built-in
-   seeding, and old rows create none in this rollout.
+3. Only a successful `POST /api/v2/import` creates a pending classification record. Existing v1
+   single import, v1 batch import, built-in seeding, and old rows create none in this rollout.
 4. Let the background worker process pending rows only when the provider is enabled.
 5. Preserve templates, assets, previews, metadata, and app associations exactly.
 6. Verify downgrade behavior by rejecting databases newer than the supported schema, matching the
@@ -453,8 +460,8 @@ Migration and pilot behavior:
 
 Add a small server-owned worker instead of extending the request lifetime:
 
-1. A successful single-slide import commits the template and a pending classification record
-   atomically. Batch import and catalog seed do not enter this workflow yet.
+1. A successful `POST /api/v2/import` commits the template and a pending classification record
+   atomically. Existing v1 imports and catalog seed do not enter this workflow.
 2. After commit, the worker is notified that work is available.
 3. It claims one row with a short database lease and increments the attempt count.
 4. It loads the app-neutral stored template and preview, builds the bounded digest, and calls the
@@ -476,9 +483,10 @@ that can multiply billable calls beyond the persisted attempt count.
 
 ## Query service and ranking
 
-Add `SlideRetrievalService.query` as the single domain entry point used by HTTP and the Agent tool.
-The Agent does not talk to SQLite directly: `query_slides` calls this server-owned service, which
-pulls stored classification data under the trusted app scope.
+Add `SlideRetrievalService.query` as the single domain entry point used by the Agent tool. It is an
+internal application service, not an HTTP handler. The Agent does not talk to SQLite directly:
+`query_slides` calls this server-owned service, which pulls stored classification data under the
+trusted app scope.
 
 Support these query modes so the Agent can ask for different information without inventing SQL:
 
@@ -543,49 +551,52 @@ type SlideQueryResult = {
 for context efficiency, not authorization: every returned section still comes from the same
 app-scoped stored record.
 
-## HTTP contract
+## Single HTTP contract: import v2
 
-Add `POST /api/v1/templates/query` before the existing `/:templateId` route so `query` is not
-interpreted as an ID. It mirrors the Agent tool and uses a route-local JSON parser with a small
-explicit limit.
+Add only `POST /api/v2/import?kind=diagram|commentary`. It keeps the existing single-slide
+PowerPoint upload format and upload limits: the request body is raw
+`application/vnd.openxmlformats-officedocument.presentationml.presentation` bytes, compressed
+request bodies are rejected, and the app scope comes from the same trusted server boundary as the
+existing routes. The endpoint rejects a deck containing zero or more than one slide.
 
-Example hybrid request:
+The v2 use case reuses the current conversion, dimension repair, preview generation, asset
+externalization, and template validation behavior. Its persistence transaction additionally writes
+the pending classification record. Do not implement v2 by calling the v1 HTTP route, and do not
+enqueue work after the transaction: either both the template and pending record commit or neither
+does.
+
+Return `201` after persistence, without waiting for OpenAI classification or embedding:
 
 ```json
 {
-  "mode": "hybrid",
-  "query": "current-state application architecture with integrations",
-  "template_ids": [],
-  "similar_to_template_id": null,
-  "facet_name": null,
-  "filters": {
-    "kinds": ["diagram"],
-    "slide_types": ["architecture"],
-    "business_domains": [],
-    "technologies": [],
-    "content_density": ["medium", "high"],
-    "has_timeline": null,
-    "has_table": false,
-    "has_chart": null,
-    "has_process_flow": null,
-    "has_kpis": null,
-    "has_recommendations": null
-  },
-  "select": ["identity", "content", "visual", "capabilities"],
-  "limit": 5
+  "previewAvailable": true,
+  "templateId": "template-123",
+  "templateJson": { "presentation": {} },
+  "warnings": [],
+  "retrieval": {
+    "status": "pending"
+  }
 }
 ```
 
-Validate cross-field requirements by mode: text-bearing modes require a nonblank `query`; `by_id`
-requires `template_ids`; `similar` requires `similar_to_template_id`; and `facets` requires
-`facet_name`. Reject irrelevant nonempty mode inputs rather than silently ignoring them, and reject
-`all` when it is combined with another projection. Slide
-queries return `{ mode_used, warnings, results }`; facet queries return
-`{ mode_used: 'facets', facet, values: [{ value, count }] }`.
+`retrieval.status` is always `pending` on a successful v2 response, including when the worker is
+temporarily disabled; it confirms that durable work was created, not that provider work has
+started. Use the existing sanitized error envelope and status mapping for invalid content type,
+oversized input, malformed PowerPoint data, wrong slide count, cancellation, and internal failure.
+Unsupported methods on `/api/v2/import` return `405`.
 
-Keep `GET /api/v1/templates/:templateId` as the full-slide retrieval endpoint. Do not make the
-existing single-import response wait for classification or embedding. Do not add a public
-classification, embedding, or backfill endpoint in the pilot.
+The new version is additive. Keep all `/api/v1/*` request and response contracts unchanged. In
+particular, `POST /api/v1/import` and `POST /api/v1/batchImport` never create classification work,
+and the v1 single-import response does not gain `retrieval`. Existing v1 template and asset reads
+remain available to current clients, but this plan adds no v2 read route and no public query,
+classification, embedding, status, retry, or backfill endpoint.
+
+Internal Agent inputs still require cross-field validation: text-bearing modes require a nonblank
+`query`; `by_id` requires `template_ids`; `similar` requires `similar_to_template_id`; and `facets`
+requires `facet_name`. Reject irrelevant nonempty mode inputs rather than silently ignoring them,
+and reject `all` when it is combined with another projection. Slide tool calls return
+`{ mode_used, warnings, results }`; facet tool calls return
+`{ mode_used: 'facets', facet, values: [{ value, count }] }`.
 
 ## OpenAI Agents SDK integration
 
@@ -670,15 +681,17 @@ context.
 | `server/src/services/SlideRetrievalService.ts` | Query modes, projections, app-scoped retrieval, and hybrid ranking. |
 | `server/src/repositories/TemplateRepository.ts` | Provider-neutral classification and search records/methods. |
 | `server/src/repositories/SqliteTemplateRepository.ts` | Job state, facets, FTS, embedding BLOBs, and query primitives. |
-| `server/src/routes/templateRoutes.ts` | Register `/query` before `/:templateId`. |
-| `server/src/handlers/slideRetrievalHandlers.ts` | HTTP validation and response adaptation only. |
+| `server/src/apiPaths.ts` and `server/src/app.ts` | Mount only the new `POST /api/v2/import` route under v2 while preserving every v1 mount. |
+| `server/src/routes/importRoutes.ts` | Add the v2 import router with the existing bounded raw PowerPoint parser and explicit `405` handling. |
+| `server/src/handlers/importHandlers.ts` | Adapt the v2 upload to `ImportService.importV2` and return the pending retrieval state. |
 | `server/src/config.ts` | Classification provider, model, limits, timeout, attempts, and concurrency. |
 | `server/src/server.ts` | Build provider adapters/worker, start after seeding, and drain on shutdown. |
-| `server/src/services/ImportTemplateService.ts` | Enqueue only successful single imports; leave `batchImport` unchanged. |
+| `server/src/services/ImportTemplateService.ts` | Add `importV2`; share safe import mechanics but preserve `import` and `batchImport` behavior. |
 | `server/test/slideClassification*.test.ts` | Schema, digest, classification adapter, worker, retry, and prompt tests. |
 | `server/test/slideEmbedding*.test.ts` | Document builder, adapter, vector validation, retry, and similarity tests. |
-| `server/test/slideRetrieval*.test.ts` | Query modes, hybrid rank, projection, app isolation, API, and Agent tool tests. |
-| `docs/api/README.md` and `server/README.md` | Query contract, configuration, pilot scope, privacy, and runbook. |
+| `server/test/slideRetrieval*.test.ts` | Internal query modes, hybrid rank, projection, app isolation, and Agent tool tests. |
+| `server/test/importV2Api.test.ts` | Exact v2 upload/response contract, atomic enqueue, v1 isolation, limits, errors, and methods. |
+| `docs/api/README.md` and `server/README.md` | Import v2 contract, configuration, internal retrieval scope, privacy, and runbook. |
 
 ## Test plan
 
@@ -709,8 +722,9 @@ context.
 
 - Migrate a version-3 database without losing templates or app associations.
 - Create no pending work for existing templates during migration.
-- Insert a template and pending classification atomically for `ImportService.import`.
-- Prove `ImportService.batchImport` and built-in seeding create no classification or embedding work.
+- Insert a template and pending classification atomically for `ImportService.importV2`.
+- Prove `ImportService.import`, `ImportService.batchImport`, and built-in seeding create no
+  classification or embedding work.
 - Claim each job once, recover an expired lease, and respect concurrency.
 - Retry only transient failures, enforce maximum attempts, and preserve old usable metadata during
   refresh failure.
@@ -723,7 +737,7 @@ context.
 - Avoid reclassification when the complete input fingerprint is unchanged.
 - Re-embed without reclassifying when only the embedding fingerprint changes.
 
-### Retrieval and API tests
+### Internal retrieval and import v2 API tests
 
 - Cover `text`, `semantic`, `hybrid`, `filter`, `similar`, `by_id`, and `facets` modes.
 - Rank expected candidates for title, purpose, technology, entity, use-case, and keyword queries.
@@ -732,18 +746,24 @@ context.
 - Return only requested metadata sections and make `all` mutually exclusive with named sections.
 - Preserve deterministic ordering for score ties.
 - Reject malformed FTS syntax as input rather than passing it through.
-- Enforce the result limit and small request-body limit.
+- Enforce the internal tool result limit.
 - Never return another app's template, metadata, preview URL, vector, or existence signal.
 - Never expose vectors, raw scores, database details, or model-controlled app IDs.
-- Return lightweight projected records; retrieve full JSON through the existing ID endpoint.
-- Register `/query` before `/:templateId` and return `405` for unsupported methods.
+- Return lightweight projected records to the Agent tool; load full JSON through the internal
+  template service rather than a new HTTP endpoint.
+- Accept only a bounded single-slide PowerPoint at `POST /api/v2/import`, return `201` with
+  `retrieval.status: 'pending'`, and return `405` for unsupported methods.
+- Prove the template and pending classification are committed atomically and no work is created
+  when conversion, validation, preview handling, asset persistence, or the transaction fails.
+- Prove every existing `/api/v1/*` response and side effect remains unchanged, including the
+  absence of classification work for v1 single and batch imports.
 - Return a retriable error for unavailable `semantic` queries and a visible lexical-fallback warning
   for unavailable `hybrid` queries.
 
 ### Agent retrieval evaluation
 
-Build a checked-in, non-sensitive gold set of synthetic fixtures imported through the single-slide
-path:
+Build a checked-in, non-sensitive gold set of synthetic fixtures imported through
+`POST /api/v2/import`:
 
 - natural-language question;
 - optional facets;
@@ -765,11 +785,12 @@ token usage without storing slide content in logs.
    facets, FTS index, vector BLOB validation, and repository tests.
 3. **Provider boundaries** — add direct server dependencies, configuration, `SlideClassifier`,
    `SlideEmbedder`, OpenAI adapters, fakes, and error mapping.
-4. **Single-import integration** — enqueue only `ImportService.import`, process classification then
-   embedding with bounded retries, recover leases, and drain on shutdown. Add a regression test
-   proving batch import and seed behavior are untouched.
-5. **Query API** — implement every app-scoped query mode, metadata projection, and the small
-   `POST /templates/query` contract.
+4. **Import v2 integration** — mount only `POST /api/v2/import`, atomically persist the imported
+   template and pending work, then process classification and embedding with bounded retries,
+   lease recovery, and shutdown draining. Add regression tests proving every v1 import, batch
+   import, and seed behavior is untouched.
+5. **Internal retrieval service** — implement every app-scoped query mode and metadata projection
+   for the Agent adapter without adding an HTTP query route.
 6. **Pilot evaluation** — import a bounded synthetic or non-sensitive single-slide fixture set,
    compare lexical/semantic/hybrid quality, and meet the gates before enabling by default.
 7. **Agent adapter** — add `@openai/agents` only with the Agent runtime, wrap the retrieval/load
@@ -785,6 +806,7 @@ Run focused tests first, then the repository-wide checks:
 npm run test --workspace @diligence-studio/server -- test/slideClassification.test.ts
 npm run test --workspace @diligence-studio/server -- test/slideEmbedding.test.ts
 npm run test --workspace @diligence-studio/server -- test/slideRetrieval.test.ts
+npm run test --workspace @diligence-studio/server -- test/importV2Api.test.ts
 npm run test --workspace @diligence-studio/server -- test/importApi.test.ts
 npm run typecheck
 npm test
@@ -797,10 +819,10 @@ must be a separate explicitly invoked command with a documented cost ceiling.
 
 ## Definition of done
 
-- Every successful `ImportService.import` call receives durable classification and embedding state
-  without delaying its response.
-- `ImportService.batchImport`, built-in seeding, and pre-existing templates produce no new
-  classification or embedding work in the pilot.
+- Every successful `POST /api/v2/import` call atomically creates durable pending classification
+  state and returns without waiting for classification or embedding.
+- Existing v1 single import, v1 batch import, built-in seeding, and pre-existing templates produce
+  no new classification or embedding work in the pilot.
 - Successful classifications exactly satisfy the canonical metadata schema, and successful vectors
   match the configured model and dimensions.
 - Provider outages cannot lose templates, break listing/loading, or erase older usable metadata.
@@ -813,9 +835,12 @@ must be a separate explicitly invoked command with a documented cost ceiling.
   default.
 - Embeddings are stored transactionally in SQLite; no second hosted index is required.
 
-## Out of scope for v1
+## Out of scope for the import v2 pilot
 
-- classification or embedding for batch imports, built-in seeds, or pre-existing templates;
+- changes to any `/api/v1/*` request, response, or persistence side effect;
+- a v2 batch-import endpoint or classification and embedding for v1 imports, built-in seeds, or
+  pre-existing templates;
+- public HTTP query, classification-status, retry, or backfill endpoints;
 - an OpenAI vector store, hosted file search, or approximate-nearest-neighbor service;
 - automatic replacement of the browser model selector;
 - a public endpoint that spends money by forcing reclassification;

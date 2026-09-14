@@ -3,10 +3,10 @@ import { randomUUID } from 'node:crypto'
 import express from 'express'
 
 import { createApiLoggingMiddleware, recordApiError, type ApiLogger } from './apiLogging'
-import { API_V1_PATH } from './apiPaths'
+import { API_V1_PATH, API_V2_PATH } from './apiPaths'
 import { ApiError, errorHandler, notFoundHandler } from './errors'
 import { createExportRouter } from './routes/exportRoutes'
-import { createBatchImportRouter, createImportRouter } from './routes/importRoutes'
+import { createBatchImportRouter, createImportRouter, createImportV2Router } from './routes/importRoutes'
 import { createTemplateRouter } from './routes/templateRoutes'
 import type { ExportPowerPointUseCase } from './services/ExportPowerPointService'
 import type { ImportService } from './services/ImportTemplateService'
@@ -25,6 +25,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
 export function createApp(dependencies: AppDependencies) {
   const app = express()
   const apiV1 = express.Router()
+  const apiV2 = express.Router()
   app.disable('x-powered-by')
 
   app.use((_request, response, next) => {
@@ -69,6 +70,8 @@ export function createApp(dependencies: AppDependencies) {
   )
   apiV1.use('/templates', createTemplateRouter(dependencies.importService))
   app.use(API_V1_PATH, apiV1)
+  apiV2.use('/import', createImportV2Router(dependencies.importService, dependencies.maxUploadBytes))
+  app.use(API_V2_PATH, apiV2)
   app.use(notFoundHandler)
   app.use(errorHandler)
 

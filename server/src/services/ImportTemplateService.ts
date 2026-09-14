@@ -9,6 +9,14 @@ import type {
   PowerPointCanvasElement,
   PowerPointCanvasJson,
 } from '../lib/import/PowerpointImportTypes'
+import {
+  buildSlideClassificationInputFingerprint,
+  checksumBytes,
+} from '../lib/retrieval/SlideClassificationInput'
+import {
+  SLIDE_CLASSIFICATION_PROMPT_VERSION,
+  SLIDE_CLASSIFICATION_SCHEMA_VERSION,
+} from '../lib/retrieval/SlideRetrievalMetadata'
 import type {
   TemplateInsert,
   TemplateKind,
@@ -66,6 +74,14 @@ export type BatchImportResponse = {
   warnings: string[]
 }
 
+export type ImportV2Response = {
+  previewAvailable: boolean
+  retrieval: { status: 'pending' }
+  templateId: string
+  templateJson: PowerPointCanvasJson
+  warnings: string[]
+}
+
 export const TEMPLATE_PREVIEW_PAGE_SIZE = 10
 
 export class ImportService {
@@ -75,6 +91,7 @@ export class ImportService {
     private readonly createTemplateId: () => string = randomUUID,
     private readonly createAssetId: () => string = randomUUID,
     private readonly previewGenerator: TemplatePreviewGenerator = new DisabledTemplatePreviewGenerator(),
+    private readonly notifyClassificationWork: () => void = () => undefined,
   ) {}
 
   async import(
@@ -82,6 +99,32 @@ export class ImportService {
     kind: TemplateKind = 'diagram',
     signal?: AbortSignal,
     appId: string = DEFAULT_APP_ID,
+  ) {
+    return this.#importSingle(source, kind, signal, appId, false)
+  }
+
+  /** Import one slide and atomically persist its template plus durable classification work. */
+  async importV2(
+    source: Buffer,
+    kind: TemplateKind = 'diagram',
+    signal?: AbortSignal,
+    appId: string = DEFAULT_APP_ID,
+  ): Promise<ImportV2Response> {
+    const result = await this.#importSingle(source, kind, signal, appId, true)
+    try {
+      this.notifyClassificationWork()
+    } catch {
+      // Notification is best-effort; durable polling will recover the committed job.
+    }
+    return { ...result, retrieval: { status: 'pending' } }
+  }
+
+  async #importSingle(
+    source: Buffer,
+    kind: TemplateKind,
+    signal: AbortSignal | undefined,
+    appId: string,
+    createClassification: boolean,
   ) {
     this.templates.ensureApp(appId)
     const workingDirectory = await mkdtemp(path.join(tmpdir(), 'diligence-studio-import-'))
@@ -122,10 +165,9 @@ export class ImportService {
         templateId,
         templateJson: externalized.templateJson,
       }
-      this.templates.insert(
-        template,
-        externalized.assets,
-        {
+      const record: TemplateInsert = {
+        assets: externalized.assets,
+        metadata: {
           checksum: null,
           createdAt: new Date().toISOString(),
           description: 'Imported PowerPoint template',
@@ -133,9 +175,27 @@ export class ImportService {
           source: 'import',
           templateId,
         },
-        preview ? { ...preview, templateId } : undefined,
-        appId,
-      )
+        preview: preview ? { ...preview, templateId } : undefined,
+        template,
+      }
+      if (createClassification) {
+        this.templates.insertWithPendingClassification(record, {
+          inputFingerprint: buildSlideClassificationInputFingerprint(
+            externalized.templateJson,
+            preview ? checksumBytes(preview.bytes) : null,
+          ),
+          promptVersion: SLIDE_CLASSIFICATION_PROMPT_VERSION,
+          schemaVersion: SLIDE_CLASSIFICATION_SCHEMA_VERSION,
+        }, appId)
+      } else {
+        this.templates.insert(
+          template,
+          externalized.assets,
+          record.metadata,
+          record.preview,
+          appId,
+        )
+      }
 
       return {
         previewAvailable: preview !== undefined,

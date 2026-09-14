@@ -32,6 +32,18 @@ Configuration is read once at startup:
   web app) while imports are running.
 - `TEMPLATE_PREVIEW_TIMEOUT_MS` defaults to `15000`.
 - `MAX_TEMPLATE_PREVIEW_BYTES` defaults to `10485760` (10 MiB).
+- `SLIDE_CLASSIFICATION_PROVIDER` is `disabled` by default and may be set to `openai`.
+- When classification is enabled, `OPENAI_API_KEY`, `OPENAI_SLIDE_CLASSIFICATION_MODEL`, and
+  `OPENAI_SLIDE_EMBEDDING_MODEL` are required. Use `text-embedding-3-small` for the initial pilot;
+  `OPENAI_SLIDE_EMBEDDING_DIMENSIONS` is optional.
+- `SLIDE_CLASSIFICATION_TIMEOUT_MS` and `SLIDE_EMBEDDING_TIMEOUT_MS` default to `45000` and
+  `20000`. `SLIDE_CLASSIFICATION_MAX_ATTEMPTS` and `SLIDE_EMBEDDING_MAX_ATTEMPTS` default to `3`.
+- `SLIDE_CLASSIFICATION_MAX_TEXT_CHARS`, `SLIDE_CLASSIFICATION_MAX_IMAGE_BYTES`, and
+  `SLIDE_EMBEDDING_MAX_TEXT_BYTES` default to `12000`, `5242880`, and `32000`.
+- `SLIDE_CLASSIFICATION_CONCURRENCY` defaults to `1` and is capped at `8`.
+
+The API key is read only by the server and must never be exposed through a `VITE_*` value. Provider
+requests and routine logs omit slide content, previews, raw provider responses, and credentials.
 
 Requests time out after 30 seconds. Compressed request bodies are rejected. Template, import, and
 export requests accept an `X-App-Id` header (or `appId` query parameter) and fall back to
@@ -52,6 +64,28 @@ at `TEMPLATE_PREVIEW_RENDER_URL`. `quicklook` remains available as an explicit c
 fallback on macOS, but it renders the uploaded PowerPoint rather than the normalized canvas model.
 
 ## API
+
+### Import v2 for asynchronous retrieval indexing
+
+`POST /api/v2/import?kind=diagram|commentary` accepts the same bounded raw single-slide PowerPoint
+body as v1. It atomically stores the template and durable pending classification work, then returns
+`201` without waiting for OpenAI:
+
+```json
+{
+  "previewAvailable": true,
+  "templateId": "template-123",
+  "templateJson": { "presentation": {} },
+  "warnings": [],
+  "retrieval": { "status": "pending" }
+}
+```
+
+Pending work remains durable when the provider is disabled. Existing v1 import, batch import,
+built-in seeding, and existing templates do not create classification work. There are no public
+classification, status, retry, backfill, or retrieval routes. Retrieval is available only through
+the app-bound in-process `SlideRetrievalService`/Agent adapter; semantic and hybrid text search are
+the only query modes that may call the embedding provider.
 
 Import a deck by sending its binary `.pptx` body:
 
@@ -152,6 +186,12 @@ under an `asset_id TEXT PRIMARY KEY`, with `template_id` as a foreign key back t
 and dimensions. `apps` stores the unique app ID, display name, JSON metadata, and first/last-seen
 timestamps; `app_templates` stores app-to-template access. Template, metadata, asset, preview, and
 app-access inserts are committed in one transaction.
+Schema version 4 adds `slide_classifications` plus an FTS5 index. Classification and embedding use
+separate statuses, attempts, leases, fingerprints, and sanitized error codes. Vectors are validated
+little-endian Float32 BLOBs. The pilot scores app-scoped candidate vectors in process; measure query
+latency and evaluate a supported vector extension or dedicated store before using this design for a
+large catalog. Re-evaluate the in-process scan before an app exceeds 5,000 compatible vectors or
+when measured retrieval p95 exceeds 200 ms, whichever comes first.
 File-backed databases use SQLite WAL
 mode. Existing templates that still contain embedded base64 images or nonpositive canvas
 dimensions are migrated transactionally when they are first retrieved.
