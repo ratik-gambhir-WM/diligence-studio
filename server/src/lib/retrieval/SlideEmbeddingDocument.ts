@@ -3,44 +3,72 @@ import { createHash } from 'node:crypto'
 import type { TemplateKind } from '../../repositories/TemplateRepository'
 import type { SlideRetrievalMetadata } from './SlideRetrievalMetadata'
 
-export const SLIDE_EMBEDDING_DOCUMENT_VERSION = 1
+export const SLIDE_EMBEDDING_DOCUMENT_VERSION = 2
 
-const BOOLEAN_LABELS = [
-  ['has_timeline', 'timeline'],
-  ['has_table', 'table'],
-  ['has_chart', 'chart'],
-  ['has_process_flow', 'process flow'],
-  ['has_kpis', 'kpis'],
-  ['has_recommendations', 'recommendations'],
-] as const satisfies readonly (readonly [keyof SlideRetrievalMetadata, string])[]
+export type SlideEmbeddingDocuments = {
+  capability: string
+  subject: string
+}
 
-/** Project normalized metadata into a deterministic, labeled embedding document. */
-export function buildSlideEmbeddingDocument(
+/** Project subject meaning and reusable template capability into independent documents. */
+export function buildSlideEmbeddingDocuments(
   title: string,
   kind: TemplateKind,
   metadata: SlideRetrievalMetadata,
   maximumBytes: number,
-): string {
-  const fields: Array<readonly [string, string | readonly string[]]> = [
+): SlideEmbeddingDocuments {
+  const domainTopics = metadata.subject.domains.map((domain) => (
+    `${domain.id} (${domain.relevance}): ${domain.topics.join(' | ') || 'general'}`
+  ))
+  const subject = buildDocument([
     ['title', title],
-    ['kind', kind],
-    ['slide type', metadata.slide_type],
-    ['purpose', metadata.slide_purpose],
-    ['description', metadata.description],
-    ['topics', metadata.topics],
-    ['business domains', metadata.business_domains],
-    ['technologies', metadata.technologies],
-    ['entities', metadata.entities],
-    ['use cases', metadata.use_cases],
-    ['audience', metadata.audience],
-    ['layout', metadata.layout_type],
-    ['visual elements', metadata.visual_elements],
-    ['content density', metadata.content_density],
-    ['information types', metadata.information_types],
-    ['structural features', metadata.structural_features],
+    ['summary', metadata.subject.summary],
+    ['domain topics', domainTopics],
+    ['other topics', metadata.subject.other_topics],
+    ['claims', metadata.subject.claims],
+    ['technologies', metadata.subject.technologies],
+    ['entities', metadata.subject.entities],
+    ['synonyms', metadata.subject.synonyms],
     ['retrieval keywords', metadata.retrieval_keywords],
-    ['positive facets', BOOLEAN_LABELS.filter(([field]) => metadata[field] === true).map(([, label]) => label)],
-  ]
+  ], maximumBytes)
+  const slots = metadata.template_fit.content_slots.map((slot) => (
+    `${slot.role}: ${slot.capacity}`
+  ))
+  const capability = buildDocument([
+    ['kind', kind],
+    ['communication intents', metadata.communication.intents],
+    ['information types', metadata.communication.information_types],
+    ['audience', metadata.communication.audience],
+    ['archetype', metadata.template_fit.archetype],
+    ['content slots', slots],
+    ['layout', metadata.visual.layout_type],
+    ['visual elements', metadata.visual.visual_elements],
+    ['content density', metadata.visual.content_density],
+    ['structural features', metadata.visual.structural_features],
+  ], maximumBytes)
+  return { capability, subject }
+}
+
+/** Fingerprint the exact document role, contents, model, dimensions, and builder version. */
+export function buildSlideEmbeddingFingerprint(
+  role: keyof SlideEmbeddingDocuments,
+  document: string,
+  model: string,
+  dimensions: number | undefined,
+) {
+  return createHash('sha256').update([
+    String(SLIDE_EMBEDDING_DOCUMENT_VERSION),
+    role,
+    model,
+    dimensions === undefined ? '' : String(dimensions),
+    document,
+  ].join('\n')).digest('hex')
+}
+
+function buildDocument(
+  fields: ReadonlyArray<readonly [string, string | readonly string[]]>,
+  maximumBytes: number,
+) {
   const document = fields.flatMap(([label, value]) => {
     const normalized = typeof value === 'string'
       ? normalize(value)
@@ -52,20 +80,6 @@ export function buildSlideEmbeddingDocument(
     throw new Error('Embedding document exceeds the configured byte limit.')
   }
   return document
-}
-
-/** Fingerprint the exact document, model, dimensions, and builder version used by an embedding. */
-export function buildSlideEmbeddingFingerprint(
-  document: string,
-  model: string,
-  dimensions: number | undefined,
-) {
-  return createHash('sha256').update([
-    String(SLIDE_EMBEDDING_DOCUMENT_VERSION),
-    model,
-    dimensions === undefined ? '' : String(dimensions),
-    document,
-  ].join('\n')).digest('hex')
 }
 
 function normalize(value: string) {

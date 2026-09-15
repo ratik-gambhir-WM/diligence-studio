@@ -12,16 +12,16 @@ import { SqliteTemplateRepository } from './repositories/SqliteTemplateRepositor
 import { ExportService } from './services/ExportPowerPointService'
 import { ImportService } from './services/ImportTemplateService'
 import { SlideClassificationService } from './services/SlideClassificationService'
-import { SlideClassificationWorker } from './services/SlideClassificationWorker'
+// The background SlideClassificationWorker is intentionally disabled. Import v2 owns the
+// classification and embedding pipeline synchronously so it cannot return pending retrieval data.
 import { LibraryPowerPointConverter } from './services/PowerPointConverter'
 import {
   DisabledTemplatePreviewGenerator,
   HeadlessTemplatePreviewGenerator,
-  QuickLookTemplatePreviewGenerator,
 } from './services/TemplatePreview'
 
 const config = loadServerConfig()
-const templates = new SqliteTemplateRepository(config.databasePath)
+const templates = new SqliteTemplateRepository()
 await seedBuiltinTemplates(templates)
 const exportService = new ExportService(templates)
 const previewOptions = {
@@ -34,18 +34,8 @@ const previewGenerator = config.previewProvider === 'headless'
       ...previewOptions,
       renderUrl: config.previewRenderUrl,
     })
-  : config.previewProvider === 'quicklook'
-    ? new QuickLookTemplatePreviewGenerator(previewOptions)
-    : new DisabledTemplatePreviewGenerator()
-let classificationWorker: SlideClassificationWorker | undefined
-const importService = new ImportService(
-  new LibraryPowerPointConverter(),
-  templates,
-  undefined,
-  undefined,
-  previewGenerator,
-  () => classificationWorker?.notify(),
-)
+  : new DisabledTemplatePreviewGenerator()
+let classificationService: SlideClassificationService | undefined
 
 if (
   config.slideClassificationProvider === 'openai'
@@ -54,7 +44,7 @@ if (
   && config.openaiSlideEmbeddingModel
 ) {
   const openai = new OpenAI({ apiKey: config.openaiApiKey, maxRetries: 0 })
-  const classificationService = new SlideClassificationService({
+  classificationService = new SlideClassificationService({
     classificationModel: config.openaiSlideClassificationModel,
     classifier: new OpenAISlideClassifier({
       client: openai,
@@ -77,17 +67,15 @@ if (
     },
     repository: templates,
   })
-  classificationWorker = new SlideClassificationWorker({
-    classificationMaxAttempts: config.slideClassificationMaxAttempts,
-    classificationTimeoutMs: config.slideClassificationTimeoutMs,
-    concurrency: config.slideClassificationConcurrency,
-    embeddingMaxAttempts: config.slideEmbeddingMaxAttempts,
-    embeddingTimeoutMs: config.slideEmbeddingTimeoutMs,
-    repository: templates,
-    service: classificationService,
-  })
-  classificationWorker.start()
 }
+const importService = new ImportService(
+  new LibraryPowerPointConverter(),
+  templates,
+  undefined,
+  undefined,
+  previewGenerator,
+  classificationService,
+)
 const server = createServer(createApp({
   exportService,
   importService,
@@ -99,7 +87,7 @@ const server = createServer(createApp({
 
 server.listen(config.port, config.host, () => {
   console.log(
-    `PowerPoint API listening at ${config.host}:${config.port}; template previews: ${config.previewProvider}; slide classification: ${config.slideClassificationProvider}${config.openaiSlideClassificationModel ? ` (${config.openaiSlideClassificationModel}, concurrency ${config.slideClassificationConcurrency})` : ''}.`,
+    `PowerPoint API listening at ${config.host}:${config.port}; template previews: ${config.previewProvider}; slide classification: ${config.slideClassificationProvider}${config.openaiSlideClassificationModel ? ` (${config.openaiSlideClassificationModel}, synchronous)` : ''}.`,
   )
 })
 
@@ -115,9 +103,8 @@ function shutdown() {
   }, 10_000)
   forceCloseTimer.unref()
 
-  server.close(async (error) => {
+  server.close((error) => {
     clearTimeout(forceCloseTimer)
-    await classificationWorker?.stop()
     templates.close()
     if (error) {
       console.error('The PowerPoint API did not shut down cleanly.')

@@ -1,10 +1,8 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import path from 'node:path'
 
 import { buildAppScopedPath, DEFAULT_APP_ID } from '../appIdentity'
 import { ApiError } from '../errors'
+import { SlideProviderError } from '../integrations/SlideProvider'
 import type {
   PowerPointCanvasElement,
   PowerPointCanvasJson,
@@ -23,6 +21,7 @@ import type {
   TemplateRepository,
 } from '../repositories/TemplateRepository'
 import type { PowerPointConverter } from './PowerPointConverter'
+import type { SlideClassificationService } from './SlideClassificationService'
 import {
   DisabledTemplatePreviewGenerator,
   type TemplatePreviewGenerator,
@@ -76,7 +75,7 @@ export type BatchImportResponse = {
 
 export type ImportV2Response = {
   previewAvailable: boolean
-  retrieval: { status: 'pending' }
+  retrieval: { status: 'ready' }
   templateId: string
   templateJson: PowerPointCanvasJson
   warnings: string[]
@@ -91,7 +90,7 @@ export class ImportService {
     private readonly createTemplateId: () => string = randomUUID,
     private readonly createAssetId: () => string = randomUUID,
     private readonly previewGenerator: TemplatePreviewGenerator = new DisabledTemplatePreviewGenerator(),
-    private readonly notifyClassificationWork: () => void = () => undefined,
+    private readonly classificationService?: SlideClassificationService,
   ) {}
 
   async import(
@@ -103,20 +102,40 @@ export class ImportService {
     return this.#importSingle(source, kind, signal, appId, false)
   }
 
-  /** Import one slide and atomically persist its template plus durable classification work. */
+  /** Import one slide and return only after classification and embedding are ready in memory. */
   async importV2(
     source: Buffer,
     kind: TemplateKind = 'diagram',
     signal?: AbortSignal,
     appId: string = DEFAULT_APP_ID,
   ): Promise<ImportV2Response> {
+    if (!this.classificationService) {
+      throw new ApiError(
+        503,
+        'slide_classification_unavailable',
+        'Synchronous slide classification is not configured.',
+      )
+    }
     const result = await this.#importSingle(source, kind, signal, appId, true)
     try {
-      this.notifyClassificationWork()
-    } catch {
-      // Notification is best-effort; durable polling will recover the committed job.
+      if (!result.classificationJob) {
+        throw new Error('The v2 import did not create synchronous classification input.')
+      }
+      await this.classificationService.process(result.classificationJob, signal)
+    } catch (error) {
+      const errorCode = signal?.aborted
+        ? 'request_cancelled'
+        : error instanceof SlideProviderError ? error.code : 'classification_internal'
+      this.templates.recordSlideClassificationFailure(result.templateId, errorCode, null)
+      throw toSynchronousProcessingError(error, signal)
     }
-    return { ...result, retrieval: { status: 'pending' } }
+    return {
+      previewAvailable: result.previewAvailable,
+      retrieval: { status: 'ready' },
+      templateId: result.templateId,
+      templateJson: result.templateJson,
+      warnings: result.warnings,
+    }
   }
 
   async #importSingle(
@@ -127,77 +146,66 @@ export class ImportService {
     createClassification: boolean,
   ) {
     this.templates.ensureApp(appId)
-    const workingDirectory = await mkdtemp(path.join(tmpdir(), 'diligence-studio-import-'))
-    const inputPath = path.join(workingDirectory, 'upload.pptx')
-    const outputPath = path.join(workingDirectory, 'upload.canvas.json')
-    const previewDirectory = path.join(workingDirectory, 'preview')
-
-    try {
-      await writeFile(inputPath, source)
-      await mkdir(previewDirectory)
-      const conversion = await this.converter.convertFile(inputPath, outputPath)
-      if (conversion.templateJson.presentation.slides.length !== 1) {
-        throw new ApiError(
-          422,
-          'template_must_have_one_slide',
-          'Template PowerPoint files must contain exactly one slide.',
-        )
-      }
-      const { templateJson: repairedTemplateJson } = repairCanvasDimensions(conversion.templateJson)
-      const preview = await this.previewGenerator.generate({
-        inputPath,
-        outputDirectory: previewDirectory,
-        templateJson: repairedTemplateJson,
-      }, signal)
-      if (signal?.aborted) {
-        throw new ApiError(499, 'request_cancelled', 'The template import was cancelled.')
-      }
-      const warnings = preview
-        ? conversion.warnings
-        : [...conversion.warnings, 'A preview image could not be generated for this template.']
-      const templateId = this.createTemplateId()
-      const externalized = externalizeTemplateAssets(
-        templateId,
-        repairedTemplateJson,
-        this.createAssetId,
+    const conversion = await this.converter.convert(source)
+    if (conversion.templateJson.presentation.slides.length !== 1) {
+      throw new ApiError(
+        422,
+        'template_must_have_one_slide',
+        'Template PowerPoint files must contain exactly one slide.',
       )
-      const template = {
+    }
+    const { templateJson: repairedTemplateJson } = repairCanvasDimensions(conversion.templateJson)
+    const preview = await this.previewGenerator.generate({
+      templateJson: repairedTemplateJson,
+    }, signal)
+    if (signal?.aborted) {
+      throw new ApiError(499, 'request_cancelled', 'The template import was cancelled.')
+    }
+    const warnings = preview
+      ? conversion.warnings
+      : [...conversion.warnings, 'A preview image could not be generated for this template.']
+    const templateId = this.createTemplateId()
+    const externalized = externalizeTemplateAssets(
+      templateId,
+      repairedTemplateJson,
+      this.createAssetId,
+    )
+    const template = {
+      templateId,
+      templateJson: externalized.templateJson,
+    }
+    const record: TemplateInsert = {
+      assets: externalized.assets,
+      metadata: {
+        checksum: null,
+        createdAt: new Date().toISOString(),
+        description: 'Imported PowerPoint template',
+        kind,
+        source: 'import',
         templateId,
-        templateJson: externalized.templateJson,
-      }
-      const record: TemplateInsert = {
-        assets: externalized.assets,
-        metadata: {
-          checksum: null,
-          createdAt: new Date().toISOString(),
-          description: 'Imported PowerPoint template',
-          kind,
-          source: 'import',
-          templateId,
-        },
-        preview: preview ? { ...preview, templateId } : undefined,
-        template,
-      }
-      if (createClassification) {
-        this.templates.insertWithPendingClassification(record, {
-          inputFingerprint: buildSlideClassificationInputFingerprint(
-            externalized.templateJson,
-            preview ? checksumBytes(preview.bytes) : null,
-          ),
-          promptVersion: SLIDE_CLASSIFICATION_PROMPT_VERSION,
-          schemaVersion: SLIDE_CLASSIFICATION_SCHEMA_VERSION,
-        }, appId)
-      } else {
-        this.templates.insert(
-          template,
-          externalized.assets,
-          record.metadata,
-          record.preview,
-          appId,
-        )
-      }
-
+      },
+      preview: preview ? { ...preview, templateId } : undefined,
+      template,
+    }
+    if (createClassification) {
+      const inputFingerprint = buildSlideClassificationInputFingerprint(
+        externalized.templateJson,
+        preview ? checksumBytes(preview.bytes) : null,
+      )
+      this.templates.insertWithProcessingClassification(record, {
+        inputFingerprint,
+        promptVersion: SLIDE_CLASSIFICATION_PROMPT_VERSION,
+        schemaVersion: SLIDE_CLASSIFICATION_SCHEMA_VERSION,
+      }, appId)
       return {
+        classificationJob: {
+          attemptCount: 1,
+          inputFingerprint,
+          kind,
+          preview: record.preview,
+          template,
+          title: externalized.templateJson.presentation.title,
+        },
         previewAvailable: preview !== undefined,
         templateId,
         templateJson: hydrateCanvasTemplateAssetSources(
@@ -206,8 +214,25 @@ export class ImportService {
         ),
         warnings,
       }
-    } finally {
-      await rm(workingDirectory, { force: true, recursive: true })
+    } else {
+      this.templates.insert(
+        template,
+        externalized.assets,
+        record.metadata,
+        record.preview,
+        appId,
+      )
+    }
+
+    return {
+      classificationJob: undefined,
+      previewAvailable: preview !== undefined,
+      templateId,
+      templateJson: hydrateCanvasTemplateAssetSources(
+        externalized.templateJson,
+        externalized.assets,
+      ),
+      warnings,
     }
   }
 
@@ -218,89 +243,75 @@ export class ImportService {
     appId: string = DEFAULT_APP_ID,
   ): Promise<BatchImportResponse> {
     this.templates.ensureApp(appId)
-    const workingDirectory = await mkdtemp(path.join(tmpdir(), 'diligence-studio-batch-import-'))
-    const inputPath = path.join(workingDirectory, 'upload.pptx')
-    const outputPath = path.join(workingDirectory, 'upload.canvas.json')
-
-    try {
-      await writeFile(inputPath, source)
-      const conversion = await this.converter.convertFile(inputPath, outputPath)
-      if (conversion.templateJson.presentation.slides.length === 0) {
-        throw new ApiError(
-          422,
-          'powerpoint_has_no_slides',
-          'The PowerPoint file must contain at least one slide.',
-        )
-      }
-
-      const warnings = [...conversion.warnings]
-      const records: TemplateInsert[] = []
-      const templates: BatchImportResponse['templates'] = []
-      const createdAt = new Date().toISOString()
-
-      for (const [index, slide] of conversion.templateJson.presentation.slides.entries()) {
-        if (signal?.aborted) {
-          throw new ApiError(499, 'request_cancelled', 'The template import was cancelled.')
-        }
-
-        const templateJson: PowerPointCanvasJson = {
-          presentation: {
-            ...conversion.templateJson.presentation,
-            title: slide.name,
-            slides: [slide],
-          },
-        }
-        const { templateJson: repairedTemplateJson } = repairCanvasDimensions(templateJson)
-        const previewDirectory = path.join(workingDirectory, `preview-${index + 1}`)
-        await mkdir(previewDirectory)
-        const preview = index > 0 && this.previewGenerator.supportsIndependentSlides === false
-          ? undefined
-          : await this.previewGenerator.generate({
-              inputPath,
-              outputDirectory: previewDirectory,
-              templateJson: repairedTemplateJson,
-            }, signal)
-        if (signal?.aborted) {
-          throw new ApiError(499, 'request_cancelled', 'The template import was cancelled.')
-        }
-        if (!preview) {
-          warnings.push(`Slide ${index + 1}: A preview image could not be generated for this template.`)
-        }
-
-        const templateId = this.createTemplateId()
-        const externalized = externalizeTemplateAssets(
-          templateId,
-          repairedTemplateJson,
-          this.createAssetId,
-        )
-        records.push({
-          assets: externalized.assets,
-          metadata: {
-            checksum: null,
-            createdAt,
-            description: 'Imported PowerPoint template',
-            kind,
-            source: 'import',
-            templateId,
-          },
-          preview: preview ? { ...preview, templateId } : undefined,
-          template: { templateId, templateJson: externalized.templateJson },
-        })
-        templates.push({
-          previewAvailable: preview !== undefined,
-          templateId,
-          templateJson: hydrateCanvasTemplateAssetSources(
-            externalized.templateJson,
-            externalized.assets,
-          ),
-        })
-      }
-
-      this.templates.insertMany(records, appId)
-      return { templates, warnings }
-    } finally {
-      await rm(workingDirectory, { force: true, recursive: true })
+    const conversion = await this.converter.convert(source)
+    if (conversion.templateJson.presentation.slides.length === 0) {
+      throw new ApiError(
+        422,
+        'powerpoint_has_no_slides',
+        'The PowerPoint file must contain at least one slide.',
+      )
     }
+
+    const warnings = [...conversion.warnings]
+    const records: TemplateInsert[] = []
+    const templates: BatchImportResponse['templates'] = []
+    const createdAt = new Date().toISOString()
+
+    // TODO: Add Concurrency here
+    for (const [index, slide] of conversion.templateJson.presentation.slides.entries()) {
+      if (signal?.aborted) {
+        throw new ApiError(499, 'request_cancelled', 'The template import was cancelled.')
+      }
+
+      const templateJson: PowerPointCanvasJson = {
+        presentation: {
+          ...conversion.templateJson.presentation,
+          title: slide.name,
+          slides: [slide],
+        },
+      }
+      const { templateJson: repairedTemplateJson } = repairCanvasDimensions(templateJson)
+      const preview = await this.previewGenerator.generate({
+        templateJson: repairedTemplateJson,
+      }, signal)
+      if (signal?.aborted) {
+        throw new ApiError(499, 'request_cancelled', 'The template import was cancelled.')
+      }
+      if (!preview) {
+        warnings.push(`Slide ${index + 1}: A preview image could not be generated for this template.`)
+      }
+
+      const templateId = this.createTemplateId()
+      const externalized = externalizeTemplateAssets(
+        templateId,
+        repairedTemplateJson,
+        this.createAssetId,
+      )
+      records.push({
+        assets: externalized.assets,
+        metadata: {
+          checksum: null,
+          createdAt,
+          description: 'Imported PowerPoint template',
+          kind,
+          source: 'import',
+          templateId,
+        },
+        preview: preview ? { ...preview, templateId } : undefined,
+        template: { templateId, templateJson: externalized.templateJson },
+      })
+      templates.push({
+        previewAvailable: preview !== undefined,
+        templateId,
+        templateJson: hydrateCanvasTemplateAssetSources(
+          externalized.templateJson,
+          externalized.assets,
+        ),
+      })
+    }
+
+    this.templates.insertMany(records, appId)
+    return { templates, warnings }
   }
 
   find(templateId: string, appId: string = DEFAULT_APP_ID) {
@@ -395,6 +406,20 @@ export class ImportService {
 }
 
 export { ImportService as ImportTemplateService }
+
+function toSynchronousProcessingError(error: unknown, signal?: AbortSignal) {
+  if (signal?.aborted) {
+    return new ApiError(499, 'request_cancelled', 'The template import was cancelled.')
+  }
+  if (!(error instanceof SlideProviderError)) return error
+  if (error.code.endsWith('_timeout')) {
+    return new ApiError(504, error.code, 'Slide retrieval processing timed out.')
+  }
+  if (error.code.endsWith('_rate_limited') || error.code.endsWith('_unavailable')) {
+    return new ApiError(503, error.code, 'Slide retrieval processing is temporarily unavailable.')
+  }
+  return new ApiError(502, error.code, 'Slide retrieval processing failed.')
+}
 
 function repairCanvasDimensions(templateJson: PowerPointCanvasJson): {
   repaired: boolean

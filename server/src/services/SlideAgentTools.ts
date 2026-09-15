@@ -1,6 +1,10 @@
 import { z } from 'zod'
 
-import { SlideQueryInputSchema, type SlideRetrievalService } from './SlideRetrievalService'
+import {
+  FindSlidesForFindingInputSchema,
+  SlideQueryInputSchema,
+  type SlideRetrievalService,
+} from './SlideRetrievalService'
 import type { ImportService } from './ImportTemplateService'
 
 export const GetSlideInputSchema = z.object({
@@ -22,6 +26,10 @@ export function createSlideAgentTools(
       const slide = templates.find(template_id, appId)
       if (!slide) return { error: { code: 'slide_not_available' } }
       return slide
+    },
+    find_slides_for_finding: (untrustedInput: unknown, signal?: AbortSignal) => {
+      const input = FindSlidesForFindingInputSchema.parse(untrustedInput)
+      return retrieval.findForFinding(appId, input, signal)
     },
     query_slides: (untrustedInput: unknown, signal?: AbortSignal) => {
       const input = SlideQueryInputSchema.parse(untrustedInput)

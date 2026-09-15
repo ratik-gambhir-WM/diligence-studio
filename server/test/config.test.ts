@@ -1,8 +1,5 @@
 // @vitest-environment node
 
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
-
 import { describe, expect, it } from 'vitest'
 
 import { loadServerConfig } from '../src/config'
@@ -15,13 +12,12 @@ describe('server configuration', () => {
       MAX_TEMPLATE_PREVIEW_BYTES: '2048',
       HOST: '127.0.0.1',
       PORT: '4321',
-      SQLITE_DB_PATH: './tmp/templates.sqlite',
+      REQUEST_TIMEOUT_MS: '120000',
       TEMPLATE_PREVIEW_PROVIDER: 'disabled',
       TEMPLATE_PREVIEW_RENDER_SIZE: '1200',
       TEMPLATE_PREVIEW_RENDER_URL: 'https://preview.example.test/_internal/template-preview',
       TEMPLATE_PREVIEW_TIMEOUT_MS: '5000',
     })).toEqual({
-      databasePath: path.resolve('./tmp/templates.sqlite'),
       host: '127.0.0.1',
       openaiApiKey: null,
       openaiSlideClassificationModel: null,
@@ -35,14 +31,11 @@ describe('server configuration', () => {
       previewRenderSize: 1200,
       previewRenderUrl: 'https://preview.example.test/_internal/template-preview',
       previewTimeoutMs: 5000,
-      requestTimeoutMs: 30_000,
-      slideClassificationConcurrency: 1,
-      slideClassificationMaxAttempts: 3,
+      requestTimeoutMs: 120_000,
       slideClassificationMaxImageBytes: 5 * 1024 * 1024,
       slideClassificationMaxTextChars: 12_000,
       slideClassificationProvider: 'disabled',
       slideClassificationTimeoutMs: 45_000,
-      slideEmbeddingMaxAttempts: 3,
       slideEmbeddingMaxTextBytes: 32_000,
       slideEmbeddingTimeoutMs: 20_000,
     })
@@ -56,12 +49,11 @@ describe('server configuration', () => {
 
   it('uses the Node server bind defaults and validates HOST as an IP address', () => {
     expect(loadServerConfig({})).toMatchObject({
-      databasePath: fileURLToPath(new URL('../data/templates.sqlite', import.meta.url)),
       host: '0.0.0.0',
       port: 43127,
       previewProvider: 'headless',
       previewRenderUrl: 'http://localhost:5173/_internal/template-preview',
-      requestTimeoutMs: 30_000,
+      requestTimeoutMs: 90_000,
     })
     expect(() => loadServerConfig({ HOST: 'localhost' })).toThrow('HOST must be an IP address.')
   })
@@ -72,7 +64,7 @@ describe('server configuration', () => {
     expect(() => loadServerConfig({ TEMPLATE_PREVIEW_RENDER_URL: 'https://user:secret@example.test' }))
       .toThrow('TEMPLATE_PREVIEW_RENDER_URL must be a valid HTTP or HTTPS URL.')
     expect(() => loadServerConfig({ TEMPLATE_PREVIEW_PROVIDER: 'browser' }))
-      .toThrow('TEMPLATE_PREVIEW_PROVIDER must be headless, quicklook, or disabled.')
+      .toThrow('TEMPLATE_PREVIEW_PROVIDER must be headless or disabled.')
     expect(() => loadServerConfig({ TEMPLATE_PREVIEW_RENDER_SIZE: '5000' }))
       .toThrow('TEMPLATE_PREVIEW_RENDER_SIZE must be between 320 and 4096 pixels.')
   })

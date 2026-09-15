@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
-  buildSlideEmbeddingDocument,
+  buildSlideEmbeddingDocuments,
   buildSlideEmbeddingFingerprint,
 } from '../src/lib/retrieval/SlideEmbeddingDocument'
 import {
@@ -15,14 +15,18 @@ import { VALID_METADATA } from './slideTestFixtures'
 describe('slide embedding contracts', () => {
   it('builds deterministic labeled documents with only positive facets', () => {
     const metadata = normalizeSlideRetrievalMetadata(VALID_METADATA)
-    const document = buildSlideEmbeddingDocument('Product Architecture', 'diagram', metadata, 10_000)
-    expect(document).toContain('title: Product Architecture')
-    expect(document).toContain('technologies: Salesforce | Snowflake')
-    expect(document).toContain('positive facets: process flow')
-    expect(document).not.toContain('has_table')
-    expect(buildSlideEmbeddingFingerprint(document, 'embedding-model', 3))
-      .toBe(buildSlideEmbeddingFingerprint(document, 'embedding-model', 3))
-    expect(() => buildSlideEmbeddingDocument('Title', 'diagram', metadata, 10)).toThrow()
+    const documents = buildSlideEmbeddingDocuments('Product Architecture', 'diagram', metadata, 10_000)
+    expect(documents.subject).toContain('title: Product Architecture')
+    expect(documents.subject).toContain('technologies: Salesforce | Snowflake')
+    expect(documents.subject).toContain('cybersecurity (primary): security-testing')
+    expect(documents.capability).toContain('communication intents: finding | evidence | recommendation')
+    expect(documents.capability).toContain('content slots: headline: short-text')
+    expect(documents.capability).not.toContain('cybersecurity')
+    expect(buildSlideEmbeddingFingerprint('subject', documents.subject, 'embedding-model', 3))
+      .toBe(buildSlideEmbeddingFingerprint('subject', documents.subject, 'embedding-model', 3))
+    expect(buildSlideEmbeddingFingerprint('subject', documents.subject, 'embedding-model', 3))
+      .not.toBe(buildSlideEmbeddingFingerprint('capability', documents.subject, 'embedding-model', 3))
+    expect(() => buildSlideEmbeddingDocuments('Title', 'diagram', metadata, 10)).toThrow()
   })
 
   it('round trips little-endian Float32 vectors and validates cosine similarity', () => {

@@ -1,9 +1,5 @@
 // @vitest-environment node
 
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import path from 'node:path'
-
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { seedBuiltinTemplates } from '../src/catalog/seedBuiltinTemplates'
@@ -11,7 +7,6 @@ import type { PowerPointCanvasJson } from '../src/lib/import/PowerpointImportTyp
 import { SqliteTemplateRepository } from '../src/repositories/SqliteTemplateRepository'
 import {
   HeadlessTemplatePreviewGenerator,
-  QuickLookTemplatePreviewGenerator,
   readPngDimensions,
 } from '../src/services/TemplatePreview'
 
@@ -36,18 +31,14 @@ const EMPTY_TEMPLATE: PowerPointCanvasJson = {
 }
 
 const repositories: SqliteTemplateRepository[] = []
-const temporaryDirectories: string[] = []
 
-afterEach(async () => {
+afterEach(() => {
   repositories.splice(0).forEach((repository) => repository.close())
-  await Promise.all(
-    temporaryDirectories.splice(0).map((directory) => rm(directory, { force: true, recursive: true })),
-  )
 })
 
 describe('built-in catalog', () => {
   it('seeds stable diagram and commentary templates idempotently with previews', async () => {
-    const repository = new SqliteTemplateRepository(':memory:')
+    const repository = new SqliteTemplateRepository()
     repositories.push(repository)
 
     await seedBuiltinTemplates(repository)
@@ -65,7 +56,7 @@ describe('built-in catalog', () => {
   })
 
   it('registers app metadata and keeps built-in access independently removable', async () => {
-    const repository = new SqliteTemplateRepository(':memory:')
+    const repository = new SqliteTemplateRepository()
     repositories.push(repository)
     await seedBuiltinTemplates(repository)
 
@@ -88,49 +79,8 @@ describe('built-in catalog', () => {
 })
 
 describe('template preview validation', () => {
-  it('accepts the single PNG created by the injected Quick Look runner', async () => {
-    const directory = await mkdtemp(path.join(tmpdir(), 'tts-preview-test-'))
-    temporaryDirectories.push(directory)
-    const outputDirectory = path.join(directory, 'preview')
-    await mkdir(outputDirectory)
-    const generator = new QuickLookTemplatePreviewGenerator(
-      { maxBytes: 1024, maxDimension: 100, renderSize: 1600, timeoutMs: 1000 },
-      async (inputPath, receivedOutputDirectory, options) => {
-        expect(inputPath).toBe(path.join(directory, 'upload.pptx'))
-        expect(receivedOutputDirectory).toBe(outputDirectory)
-        expect(options.renderSize).toBe(1600)
-        await writeFile(path.join(outputDirectory, 'upload.pptx.png'), ONE_PIXEL_PNG)
-      },
-    )
-
-    await expect(generator.generate({
-      inputPath: path.join(directory, 'upload.pptx'),
-      outputDirectory,
-      templateJson: EMPTY_TEMPLATE,
-    }))
-      .resolves.toMatchObject({ bytes: ONE_PIXEL_PNG, height: 1, width: 1 })
-  })
-
-  it('rejects malformed PNG data and extra output files', async () => {
+  it('rejects malformed PNG data', () => {
     expect(readPngDimensions(Buffer.from('not png'))).toBeUndefined()
-    const directory = await mkdtemp(path.join(tmpdir(), 'tts-preview-test-'))
-    temporaryDirectories.push(directory)
-    const outputDirectory = path.join(directory, 'preview')
-    await mkdir(outputDirectory)
-    const generator = new QuickLookTemplatePreviewGenerator(
-      { maxBytes: 1024, renderSize: 1600, timeoutMs: 1000 },
-      async () => {
-        await writeFile(path.join(outputDirectory, 'one.png'), ONE_PIXEL_PNG)
-        await writeFile(path.join(outputDirectory, 'two.png'), ONE_PIXEL_PNG)
-      },
-    )
-
-    await expect(generator.generate({
-      inputPath: path.join(directory, 'upload.pptx'),
-      outputDirectory,
-      templateJson: EMPTY_TEMPLATE,
-    }))
-      .resolves.toBeUndefined()
   })
 
   it('accepts a PNG rendered from normalized JSON by the injected headless runner', async () => {
@@ -150,8 +100,6 @@ describe('template preview validation', () => {
     )
 
     await expect(generator.generate({
-      inputPath: '/unused/upload.pptx',
-      outputDirectory: '/unused/preview',
       templateJson: EMPTY_TEMPLATE,
     })).resolves.toMatchObject({ bytes: ONE_PIXEL_PNG, height: 1, width: 1 })
   })
@@ -176,8 +124,6 @@ describe('template preview validation', () => {
       },
     )
     const request = {
-      inputPath: '/unused/upload.pptx',
-      outputDirectory: '/unused/preview',
       templateJson: EMPTY_TEMPLATE,
     }
 

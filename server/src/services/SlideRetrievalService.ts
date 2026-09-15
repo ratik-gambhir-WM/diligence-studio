@@ -3,8 +3,15 @@ import { z } from 'zod'
 import { API_V1_PATH } from '../apiPaths'
 import { buildAppScopedPath } from '../appIdentity'
 import { SlideProviderError, type SlideEmbedder } from '../integrations/SlideProvider'
+import {
+  COMMUNICATION_INTENT_TAXONOMY,
+  SLIDE_DOMAIN_TAXONOMY,
+  normalizeTaxonomyValue,
+  type CommunicationIntent,
+  type SlideDomainId,
+  type SlideRetrievalMetadata,
+} from '../lib/retrieval/SlideRetrievalMetadata'
 import { cosineSimilarity, validateEmbedding } from '../lib/retrieval/SlideVector'
-import type { SlideRetrievalMetadata } from '../lib/retrieval/SlideRetrievalMetadata'
 import type {
   RetrievalClassificationRecord,
   TemplateKind,
@@ -12,54 +19,34 @@ import type {
 } from '../repositories/TemplateRepository'
 
 const FACET_NAMES = [
-  'slide_type',
-  'business_domains',
-  'technologies',
-  'audience',
+  'domains',
+  'topics',
+  'intents',
+  'archetype',
   'layout_type',
   'content_density',
-  'information_types',
-  'structural_features',
-  'has_timeline',
-  'has_table',
-  'has_chart',
-  'has_process_flow',
-  'has_kpis',
-  'has_recommendations',
+  'slot_roles',
 ] as const
 
-const SELECT_NAMES = [
-  'all',
-  'identity',
-  'content',
-  'use_cases',
-  'visual',
-  'information',
-  'structure',
-  'keywords',
-  'capabilities',
-] as const
+const SELECT_NAMES = ['all', 'subject', 'communication', 'template_fit', 'visual', 'keywords'] as const
 
 export const SlideQueryInputSchema = z.object({
   mode: z.enum(['text', 'semantic', 'hybrid', 'filter', 'similar', 'by_id', 'facets']),
-  query: z.string().max(500).nullable(),
+  query: z.string().max(2_000).nullable(),
+  semantic_target: z.enum(['subject', 'capability', 'both']),
   template_ids: z.array(z.string().trim().min(1).max(200)).max(20),
   similar_to_template_id: z.string().trim().min(1).max(200).nullable(),
   facet_name: z.enum(FACET_NAMES).nullable(),
   filters: z.object({
     kinds: z.array(z.enum(['diagram', 'commentary'])).max(2),
-    slide_types: z.array(z.string().trim().min(1).max(80)).max(10),
-    business_domains: z.array(z.string().trim().min(1).max(120)).max(10),
-    technologies: z.array(z.string().trim().min(1).max(120)).max(10),
+    domains: z.array(z.enum(SLIDE_DOMAIN_TAXONOMY)).max(10),
+    topics: z.array(z.string().trim().min(1).max(120)).max(20),
+    intents: z.array(z.enum(COMMUNICATION_INTENT_TAXONOMY)).max(10),
+    archetypes: z.array(z.string().trim().min(1).max(120)).max(10),
+    slot_roles: z.array(z.string().trim().min(1).max(100)).max(20),
     content_density: z.array(z.enum(['low', 'medium', 'high'])).max(3),
-    has_timeline: z.boolean().nullable(),
-    has_table: z.boolean().nullable(),
-    has_chart: z.boolean().nullable(),
-    has_process_flow: z.boolean().nullable(),
-    has_kpis: z.boolean().nullable(),
-    has_recommendations: z.boolean().nullable(),
   }).strict(),
-  select: z.array(z.enum(SELECT_NAMES)).min(1).max(9),
+  select: z.array(z.enum(SELECT_NAMES)).min(1).max(6),
   limit: z.number().int().min(1).max(20),
 }).strict().superRefine((value, context) => {
   const textMode = value.mode === 'text' || value.mode === 'semantic' || value.mode === 'hybrid'
@@ -80,20 +67,21 @@ export const SlideQueryInputSchema = z.object({
   }
 })
 
+export const FindSlidesForFindingInputSchema = z.object({
+  markdown: z.string().trim().min(1).max(20_000),
+  limit: z.number().int().min(1).max(20).default(5),
+}).strict()
+
 export type SlideQueryInput = z.infer<typeof SlideQueryInputSchema>
+export type FindSlidesForFindingInput = z.infer<typeof FindSlidesForFindingInputSchema>
 type SlideFacetName = NonNullable<SlideQueryInput['facet_name']>
 
 export type SlideMetadataSections = {
-  identity?: Pick<SlideRetrievalMetadata, 'slide_type' | 'slide_purpose' | 'description'>
-  content?: Pick<SlideRetrievalMetadata, 'topics' | 'business_domains' | 'technologies' | 'entities'>
-  use_cases?: Pick<SlideRetrievalMetadata, 'use_cases' | 'audience'>
-  visual?: Pick<SlideRetrievalMetadata, 'layout_type' | 'visual_elements' | 'content_density'>
-  information?: Pick<SlideRetrievalMetadata, 'information_types'>
-  structure?: Pick<SlideRetrievalMetadata, 'structural_features'>
+  subject?: SlideRetrievalMetadata['subject']
+  communication?: SlideRetrievalMetadata['communication']
+  template_fit?: SlideRetrievalMetadata['template_fit']
+  visual?: SlideRetrievalMetadata['visual']
   keywords?: Pick<SlideRetrievalMetadata, 'retrieval_keywords'>
-  capabilities?: Pick<SlideRetrievalMetadata,
-    | 'has_timeline' | 'has_table' | 'has_chart' | 'has_process_flow'
-    | 'has_kpis' | 'has_recommendations'>
 }
 
 export type SlideQueryResult = {
@@ -111,7 +99,18 @@ export type SlideRetrievalResponse = {
 } | {
   facet: SlideFacetName
   mode_used: 'facets'
-  values: Array<{ count: number; value: string | boolean }>
+  values: Array<{ count: number; value: string }>
+}
+
+export type FindingSlideMatch = {
+  kind: TemplateKind
+  matchedDomains: SlideDomainId[]
+  matchedIntents: CommunicationIntent[]
+  matchedTopics: string[]
+  matchReasons: string[]
+  previewUrl: string | null
+  templateId: string
+  title: string
 }
 
 export class SlideRetrievalError extends Error {
@@ -162,18 +161,16 @@ export class SlideRetrievalService {
         ranked = this.#lexical(appId, input.query, records)
         break
       case 'semantic':
-        ranked = await this.#semantic(input.query, records, signal)
+        ranked = await this.#semantic(input.query, records, input.semantic_target, signal)
         break
       case 'hybrid': {
         const lexical = this.#lexical(appId, input.query, records)
         try {
-          const semantic = await this.#semantic(input.query, records, signal)
-          if (semantic.length === 0 && records.length > 0) {
-            warnings.push('semantic_unavailable')
-            ranked = lexical
-          } else {
-            ranked = reciprocalRankFusion(lexical, semantic)
-          }
+          const semantic = await this.#semantic(input.query, records, input.semantic_target, signal)
+          ranked = semantic.length === 0 && records.length > 0
+            ? lexical
+            : reciprocalRankFusion(lexical, semantic)
+          if (semantic.length === 0 && records.length > 0) warnings.push('semantic_unavailable')
         } catch (error) {
           if (!(error instanceof SlideRetrievalError) || error.code !== 'semantic_unavailable') throw error
           warnings.push('semantic_unavailable')
@@ -183,12 +180,18 @@ export class SlideRetrievalService {
       }
       case 'similar': {
         const source = appRecords.find((record) => record.templateId === input.similar_to_template_id)
-        if (!source?.classification.vector || source.classification.embeddingStatus !== 'ready') {
-          throw new SlideRetrievalError('slide_not_available')
-        }
-        ranked = rankByVector(source.classification.vector, records.filter((record) => (
-          record.templateId !== source.templateId && compatibleVector(record, source.classification.embeddingModel, source.classification.embeddingDimensions)
-        )))
+        if (!source || !hasReadyVectors(source)) throw new SlideRetrievalError('slide_not_available')
+        const candidates = records.filter((record) => (
+          record.templateId !== source.templateId && compatibleVectors(
+            record,
+            source.classification.embeddingModel,
+            source.classification.embeddingDimensions,
+          )
+        ))
+        ranked = reciprocalRankFusion(
+          rankByVector(source.classification.subjectVector, candidates, 'subject'),
+          rankByVector(source.classification.capabilityVector, candidates, 'capability'),
+        )
         break
       }
     }
@@ -200,9 +203,66 @@ export class SlideRetrievalService {
     }
   }
 
-  #lexical(appId: string, query: string | null, records: readonly RetrievalClassificationRecord[]) {
+  /** Retrieve slides for a complete finding using subject and layout fitness independently. */
+  async findForFinding(
+    appId: string,
+    untrustedInput: unknown,
+    signal?: AbortSignal,
+  ): Promise<{ results: FindingSlideMatch[]; warnings: string[] }> {
+    const parsed = FindSlidesForFindingInputSchema.safeParse(untrustedInput)
+    if (!parsed.success) throw new SlideRetrievalError('invalid_query')
+    const records = this.options.repository.listRetrievalClassifications(appId)
+    if (!this.options.embedder || !this.options.embeddingModel) {
+      throw new SlideRetrievalError('semantic_unavailable')
+    }
+    const analysis = analyzeFinding(parsed.data.markdown, records)
+    const compatible = records.filter((record) => compatibleVectors(
+      record,
+      this.options.embeddingModel ?? null,
+      this.options.embeddingDimensions ?? record.classification.embeddingDimensions,
+    ))
+    if (compatible.length === 0) return { results: [], warnings: [] }
+
+    const capabilityQuery = [
+      `communication intents: ${analysis.intents.join(' | ') || 'finding | evidence | recommendation'}`,
+      `required content slots: ${analysis.requiredSlotRoles.join(' | ') || 'headline | finding | evidence'}`,
+    ].join('\n')
+    const [subjectVector, capabilityVector] = await Promise.all([
+      this.#embed(parsed.data.markdown, signal),
+      this.#embed(capabilityQuery, signal),
+    ])
+    const lexicalTerms = [...analysis.domains, ...analysis.topics, ...analysis.intents]
+    const lexical = lexicalTerms.length > 0
+      ? this.#lexical(appId, lexicalTerms.join(' '), compatible, 'OR')
+      : []
+    const fused = reciprocalRankScores([
+      lexical,
+      rankByVector(subjectVector, compatible, 'subject'),
+      rankByVector(capabilityVector, compatible, 'capability'),
+    ])
+    const ranked = fused.map(({ record, score }) => ({
+      combinedScore: score + exactFindingBoost(record, analysis) * 0.005,
+      record,
+    })).sort((left, right) => (
+      right.combinedScore - left.combinedScore
+      || right.record.createdAt.localeCompare(left.record.createdAt)
+      || left.record.templateId.localeCompare(right.record.templateId)
+    ))
+
+    return {
+      results: ranked.slice(0, parsed.data.limit).map(({ record }) => explainFindingMatch(record, analysis, appId)),
+      warnings: [],
+    }
+  }
+
+  #lexical(
+    appId: string,
+    query: string | null,
+    records: readonly RetrievalClassificationRecord[],
+    operator: 'AND' | 'OR' = 'AND',
+  ) {
     if (query === null) throw new SlideRetrievalError('invalid_query')
-    const expression = buildSafeFtsQuery(query)
+    const expression = buildSafeFtsQuery(query, operator)
     const available = new Map(records.map((record) => [record.templateId, record]))
     return this.options.repository.searchSlideClassifications(appId, expression, 200).flatMap((id) => {
       const record = available.get(id)
@@ -213,56 +273,86 @@ export class SlideRetrievalService {
   async #semantic(
     query: string | null,
     records: readonly RetrievalClassificationRecord[],
+    target: SlideQueryInput['semantic_target'],
     signal?: AbortSignal,
   ) {
-    if (query === null || !this.options.embedder || !this.options.embeddingModel) {
+    if (query === null) throw new SlideRetrievalError('invalid_query')
+    if (!this.options.embedder || !this.options.embeddingModel) {
       throw new SlideRetrievalError('semantic_unavailable')
     }
-    const compatible = records.filter((record) => compatibleVector(
+    const compatible = records.filter((record) => compatibleVectors(
       record,
       this.options.embeddingModel ?? null,
       this.options.embeddingDimensions ?? record.classification.embeddingDimensions,
     ))
     if (compatible.length === 0) return []
-    let vector: readonly number[]
+    const vector = await this.#embed(query.trim(), signal)
+    if (target === 'subject') return rankByVector(vector, compatible, 'subject')
+    if (target === 'capability') return rankByVector(vector, compatible, 'capability')
+    return reciprocalRankFusion(
+      rankByVector(vector, compatible, 'subject'),
+      rankByVector(vector, compatible, 'capability'),
+    )
+  }
+
+  async #embed(document: string, signal?: AbortSignal) {
+    if (!this.options.embedder || !this.options.embeddingModel) {
+      throw new SlideRetrievalError('semantic_unavailable')
+    }
     try {
-      vector = await this.options.embedder.embed(query.trim(), signal)
+      const vector = await this.options.embedder.embed(document, signal)
       validateEmbedding(vector, this.options.embeddingDimensions)
+      return vector
     } catch (error) {
       if (error instanceof SlideProviderError || error instanceof Error) {
         throw new SlideRetrievalError('semantic_unavailable')
       }
       throw error
     }
-    return rankByVector(vector, compatible.filter((record) => (
-      record.classification.embeddingDimensions === vector.length
-    )))
   }
 }
 
-function buildSafeFtsQuery(query: string) {
+function buildSafeFtsQuery(query: string, operator: 'AND' | 'OR') {
   if (/["*():^{}\[\]]/u.test(query)) throw new SlideRetrievalError('invalid_query')
   const tokens = query.toLocaleLowerCase('en-US').match(/[\p{L}\p{N}]+/gu) ?? []
-  if (tokens.length === 0 || tokens.length > 50) throw new SlideRetrievalError('invalid_query')
-  return [...new Set(tokens)].map((token) => `"${token}"*`).join(' AND ')
+  if (tokens.length === 0 || tokens.length > 200) throw new SlideRetrievalError('invalid_query')
+  return [...new Set(tokens)].map((token) => `"${token}"*`).join(` ${operator} `)
 }
 
-function compatibleVector(
+function hasReadyVectors(record: RetrievalClassificationRecord): record is RetrievalClassificationRecord & {
+  classification: RetrievalClassificationRecord['classification'] & {
+    capabilityVector: readonly number[]
+    subjectVector: readonly number[]
+  }
+} {
+  return record.classification.embeddingStatus === 'ready'
+    && record.classification.subjectVector !== null
+    && record.classification.capabilityVector !== null
+}
+
+function compatibleVectors(
   record: RetrievalClassificationRecord,
   model: string | null,
   dimensions: number | null,
 ) {
-  const classification = record.classification
-  return classification.embeddingStatus === 'ready'
-    && classification.vector !== null
-    && classification.embeddingModel === model
-    && classification.embeddingDimensions === dimensions
+  return hasReadyVectors(record)
+    && record.classification.embeddingModel === model
+    && record.classification.embeddingDimensions === dimensions
 }
 
-function rankByVector(vector: readonly number[], records: readonly RetrievalClassificationRecord[]) {
+function rankByVector(
+  vector: readonly number[],
+  records: readonly RetrievalClassificationRecord[],
+  role: 'subject' | 'capability',
+) {
   return records.map((record) => ({
     record,
-    score: cosineSimilarity(vector, record.classification.vector ?? []),
+    score: cosineSimilarity(
+      vector,
+      role === 'subject'
+        ? record.classification.subjectVector ?? []
+        : record.classification.capabilityVector ?? [],
+    ),
   })).sort((left, right) => (
     right.score - left.score
     || right.record.createdAt.localeCompare(left.record.createdAt)
@@ -270,57 +360,55 @@ function rankByVector(vector: readonly number[], records: readonly RetrievalClas
   )).map(({ record }) => record)
 }
 
-/** Fuse lexical and semantic ordinal ranks without combining incomparable raw scores. */
+/** Fuse ordinal ranks without combining incomparable lexical and vector scores. */
 export function reciprocalRankFusion(
-  lexical: readonly RetrievalClassificationRecord[],
-  semantic: readonly RetrievalClassificationRecord[],
+  first: readonly RetrievalClassificationRecord[],
+  second: readonly RetrievalClassificationRecord[],
+  rankConstant = 60,
+) {
+  return reciprocalRankScores([first, second], rankConstant).map(({ record }) => record)
+}
+
+function reciprocalRankScores(
+  rankings: ReadonlyArray<readonly RetrievalClassificationRecord[]>,
   rankConstant = 60,
 ) {
   const records = new Map<string, { record: RetrievalClassificationRecord; score: number }>()
-  for (const [index, record] of lexical.entries()) {
-    records.set(record.templateId, { record, score: 1 / (rankConstant + index + 1) })
-  }
-  for (const [index, record] of semantic.entries()) {
-    const current = records.get(record.templateId)
-    if (current) current.score += 1 / (rankConstant + index + 1)
-    else records.set(record.templateId, { record, score: 1 / (rankConstant + index + 1) })
+  for (const ranking of rankings) {
+    for (const [index, record] of ranking.entries()) {
+      const current = records.get(record.templateId)
+      if (current) current.score += 1 / (rankConstant + index + 1)
+      else records.set(record.templateId, { record, score: 1 / (rankConstant + index + 1) })
+    }
   }
   return [...records.values()].sort((left, right) => (
     right.score - left.score
     || right.record.createdAt.localeCompare(left.record.createdAt)
     || left.record.templateId.localeCompare(right.record.templateId)
-  )).map(({ record }) => record)
+  ))
 }
 
-function applyFilters(
-  records: readonly RetrievalClassificationRecord[],
-  filters: SlideQueryInput['filters'],
-) {
+function applyFilters(records: readonly RetrievalClassificationRecord[], filters: SlideQueryInput['filters']) {
   const includes = (values: readonly string[], requested: readonly string[]) => requested.length === 0
     || requested.some((value) => values.some((candidate) => equal(candidate, value)))
   return records.filter(({ classification, kind }) => {
     const metadata = classification.metadata
     if (!metadata) return false
+    const domains = metadata.subject.domains.map((domain) => domain.id)
+    const topics = [...metadata.subject.domains.flatMap((domain) => domain.topics), ...metadata.subject.other_topics]
+    const slotRoles = metadata.template_fit.content_slots.map((slot) => slot.role)
     return (filters.kinds.length === 0 || filters.kinds.includes(kind))
-      && includes([metadata.slide_type], filters.slide_types)
-      && includes(metadata.business_domains, filters.business_domains)
-      && includes(metadata.technologies, filters.technologies)
-      && (filters.content_density.length === 0 || filters.content_density.includes(metadata.content_density))
-      && matchesBoolean(metadata.has_timeline, filters.has_timeline)
-      && matchesBoolean(metadata.has_table, filters.has_table)
-      && matchesBoolean(metadata.has_chart, filters.has_chart)
-      && matchesBoolean(metadata.has_process_flow, filters.has_process_flow)
-      && matchesBoolean(metadata.has_kpis, filters.has_kpis)
-      && matchesBoolean(metadata.has_recommendations, filters.has_recommendations)
+      && includes(domains, filters.domains)
+      && includes(topics, filters.topics)
+      && includes(metadata.communication.intents, filters.intents)
+      && includes([metadata.template_fit.archetype], filters.archetypes)
+      && includes(slotRoles, filters.slot_roles)
+      && (filters.content_density.length === 0 || filters.content_density.includes(metadata.visual.content_density))
   })
 }
 
-function matchesBoolean(value: boolean, requested: boolean | null) {
-  return requested === null || value === requested
-}
-
 function equal(left: string, right: string) {
-  return left.toLocaleLowerCase('en-US') === right.toLocaleLowerCase('en-US')
+  return normalizeTaxonomyValue(left) === normalizeTaxonomyValue(right)
 }
 
 function projectRecord(
@@ -332,51 +420,171 @@ function projectRecord(
   if (!metadata) throw new Error('Retrieval metadata is missing.')
   const requested = new Set(select.includes('all') ? SELECT_NAMES.filter((name) => name !== 'all') : select)
   const sections: SlideMetadataSections = {}
-  if (requested.has('identity')) sections.identity = pick(metadata, ['slide_type', 'slide_purpose', 'description'])
-  if (requested.has('content')) sections.content = pick(metadata, ['topics', 'business_domains', 'technologies', 'entities'])
-  if (requested.has('use_cases')) sections.use_cases = pick(metadata, ['use_cases', 'audience'])
-  if (requested.has('visual')) sections.visual = pick(metadata, ['layout_type', 'visual_elements', 'content_density'])
-  if (requested.has('information')) sections.information = pick(metadata, ['information_types'])
-  if (requested.has('structure')) sections.structure = pick(metadata, ['structural_features'])
-  if (requested.has('keywords')) sections.keywords = pick(metadata, ['retrieval_keywords'])
-  if (requested.has('capabilities')) sections.capabilities = pick(metadata, [
-    'has_timeline', 'has_table', 'has_chart', 'has_process_flow', 'has_kpis', 'has_recommendations',
-  ])
+  if (requested.has('subject')) sections.subject = metadata.subject
+  if (requested.has('communication')) sections.communication = metadata.communication
+  if (requested.has('template_fit')) sections.template_fit = metadata.template_fit
+  if (requested.has('visual')) sections.visual = metadata.visual
+  if (requested.has('keywords')) sections.keywords = { retrieval_keywords: metadata.retrieval_keywords }
   return {
     kind: record.kind,
-    previewUrl: record.previewAvailable
-      ? buildAppScopedPath(`${API_V1_PATH}/templates/${record.templateId}/preview`, appId)
-      : null,
+    previewUrl: previewUrl(record, appId),
     sections,
     templateId: record.templateId,
     title: record.title,
   }
 }
 
-function pick<ObjectType extends object, Key extends keyof ObjectType>(
-  object: ObjectType,
-  keys: readonly Key[],
-): Pick<ObjectType, Key> {
-  return Object.fromEntries(keys.map((key) => [key, object[key]])) as Pick<ObjectType, Key>
-}
-
 function buildFacetResponse(
   records: readonly RetrievalClassificationRecord[],
   facet: SlideFacetName,
 ): Extract<SlideRetrievalResponse, { mode_used: 'facets' }> {
-  const counts = new Map<string | boolean, number>()
+  const counts = new Map<string, number>()
   for (const { classification } of records) {
     const metadata = classification.metadata
     if (!metadata) continue
-    const raw = metadata[facet]
-    const values = Array.isArray(raw) ? raw : [raw]
-    for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1)
+    const values = facetValues(metadata, facet)
+    for (const value of new Set(values)) counts.set(value, (counts.get(value) ?? 0) + 1)
   }
   return {
     facet,
     mode_used: 'facets',
     values: [...counts.entries()]
       .map(([value, count]) => ({ count, value }))
-      .sort((left, right) => right.count - left.count || String(left.value).localeCompare(String(right.value))),
+      .sort((left, right) => right.count - left.count || left.value.localeCompare(right.value)),
   }
+}
+
+function facetValues(metadata: SlideRetrievalMetadata, facet: SlideFacetName): string[] {
+  switch (facet) {
+    case 'domains': return metadata.subject.domains.map((domain) => domain.id)
+    case 'topics': return [...metadata.subject.domains.flatMap((domain) => domain.topics), ...metadata.subject.other_topics]
+    case 'intents': return metadata.communication.intents
+    case 'archetype': return [metadata.template_fit.archetype]
+    case 'layout_type': return [metadata.visual.layout_type]
+    case 'content_density': return [metadata.visual.content_density]
+    case 'slot_roles': return metadata.template_fit.content_slots.map((slot) => slot.role)
+  }
+}
+
+type FindingAnalysis = {
+  domains: SlideDomainId[]
+  intents: CommunicationIntent[]
+  requiredSlotRoles: string[]
+  topics: string[]
+}
+
+const DOMAIN_TERMS: Readonly<Record<SlideDomainId, readonly string[]>> = {
+  cybersecurity: ['cyber', 'cybersecurity', 'security', 'vulnerability', 'iam', 'penetration test'],
+  'software-architecture': ['software architecture', 'application architecture', 'extensibility', 'integration'],
+  'data-ai': ['data', 'analytics', 'artificial intelligence', 'machine learning', 'ai'],
+  infrastructure: ['infrastructure', 'network', 'server', 'compute', 'storage', 'datacenter'],
+  cloud: ['cloud', 'aws', 'azure', 'gcp'],
+  'product-engineering': ['product engineering', 'sdlc', 'developer', 'code quality'],
+  'it-operations': ['it operations', 'service management', 'incident', 'monitoring'],
+  'business-applications': ['erp', 'crm', 'business application'],
+  'governance-risk-compliance': ['governance', 'compliance', 'regulatory', 'risk management'],
+  other: [],
+}
+
+const INTENT_SLOT_ROLES: Readonly<Partial<Record<CommunicationIntent, readonly string[]>>> = {
+  finding: ['finding'],
+  evidence: ['evidence'],
+  recommendation: ['recommendation'],
+  comparison: ['comparison-left', 'comparison-right'],
+  metric: ['metric'],
+  process: ['process-step'],
+  timeline: ['timeline-event'],
+}
+
+function analyzeFinding(markdown: string, records: readonly RetrievalClassificationRecord[]): FindingAnalysis {
+  const searchable = normalizeSearchText(markdown)
+  const domains = SLIDE_DOMAIN_TAXONOMY.filter((domain) => (
+    domain !== 'other' && DOMAIN_TERMS[domain].some((term) => containsPhrase(searchable, term))
+  ))
+  const intents = COMMUNICATION_INTENT_TAXONOMY.filter((intent) => (
+    containsPhrase(searchable, intent)
+  ))
+  const resolvedIntents: CommunicationIntent[] = intents.length > 0
+    ? intents
+    : ['finding', 'evidence', 'recommendation']
+  const allTopics = new Set(records.flatMap(({ classification }) => {
+    const metadata = classification.metadata
+    return metadata
+      ? [...metadata.subject.domains.flatMap((domain) => domain.topics), ...metadata.subject.other_topics]
+      : []
+  }))
+  const topics = [...allTopics].filter((topic) => containsPhrase(searchable, topic))
+  const requiredSlotRoles = [
+    'headline',
+    ...resolvedIntents.flatMap((intent) => INTENT_SLOT_ROLES[intent] ?? []),
+  ]
+  return {
+    domains,
+    intents: resolvedIntents,
+    requiredSlotRoles: [...new Set(requiredSlotRoles)],
+    topics,
+  }
+}
+
+function exactFindingBoost(record: RetrievalClassificationRecord, analysis: FindingAnalysis) {
+  const metadata = record.classification.metadata
+  if (!metadata) return 0
+  const domainScore = metadata.subject.domains.reduce((score, domain) => (
+    analysis.domains.includes(domain.id) ? score + (domain.relevance === 'primary' ? 6 : 3) : score
+  ), 0)
+  const topics = [...metadata.subject.domains.flatMap((domain) => domain.topics), ...metadata.subject.other_topics]
+  const topicScore = analysis.topics.filter((topic) => topics.some((candidate) => equal(candidate, topic))).length * 4
+  const intentScore = analysis.intents.filter((intent) => metadata.communication.intents.includes(intent)).length * 2
+  const slotRoles = metadata.template_fit.content_slots.map((slot) => slot.role)
+  const slotScore = analysis.requiredSlotRoles.filter((role) => slotRoles.some((slot) => equal(slot, role))).length * 2
+  return domainScore + topicScore + intentScore + slotScore
+}
+
+function explainFindingMatch(
+  record: RetrievalClassificationRecord,
+  analysis: FindingAnalysis,
+  appId: string,
+): FindingSlideMatch {
+  const metadata = record.classification.metadata
+  if (!metadata) throw new Error('Retrieval metadata is missing.')
+  const matchedDomains = metadata.subject.domains
+    .filter((domain) => analysis.domains.includes(domain.id))
+    .map((domain) => domain.id)
+  const slideTopics = [...metadata.subject.domains.flatMap((domain) => domain.topics), ...metadata.subject.other_topics]
+  const matchedTopics = analysis.topics.filter((topic) => slideTopics.some((candidate) => equal(candidate, topic)))
+  const matchedIntents = analysis.intents.filter((intent) => metadata.communication.intents.includes(intent))
+  const slotRoles = metadata.template_fit.content_slots.map((slot) => slot.role)
+  const matchedSlots = analysis.requiredSlotRoles.filter((role) => slotRoles.some((slot) => equal(slot, role)))
+  const matchReasons = [
+    ...matchedDomains.map((domain) => `${domain} subject match`),
+    ...matchedTopics.map((topic) => `${topic} topic match`),
+    ...(matchedIntents.length > 0 ? [`Supports ${matchedIntents.join(', ')} communication`] : []),
+    ...(matchedSlots.length > 0 ? [`Provides ${matchedSlots.join(', ')} content slots`] : []),
+  ]
+  if (matchReasons.length === 0) matchReasons.push('Semantic subject and template-capability similarity')
+  return {
+    kind: record.kind,
+    matchedDomains,
+    matchedIntents,
+    matchedTopics,
+    matchReasons,
+    previewUrl: previewUrl(record, appId),
+    templateId: record.templateId,
+    title: record.title,
+  }
+}
+
+function previewUrl(record: RetrievalClassificationRecord, appId: string) {
+  return record.previewAvailable
+    ? buildAppScopedPath(`${API_V1_PATH}/templates/${record.templateId}/preview`, appId)
+    : null
+}
+
+function normalizeSearchText(value: string) {
+  return value.toLocaleLowerCase('en-US').replace(/[^a-z0-9]+/gu, ' ').replace(/\s+/gu, ' ').trim()
+}
+
+function containsPhrase(normalizedText: string, phrase: string) {
+  const normalizedPhrase = normalizeSearchText(phrase)
+  return normalizedPhrase.length > 0 && ` ${normalizedText} `.includes(` ${normalizedPhrase} `)
 }

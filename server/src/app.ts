@@ -20,7 +20,7 @@ export type AppDependencies = {
   requestTimeoutMs?: number
 }
 
-const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
+const DEFAULT_REQUEST_TIMEOUT_MS = 90_000
 
 export function createApp(dependencies: AppDependencies) {
   const app = express()

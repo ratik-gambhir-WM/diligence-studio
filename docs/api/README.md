@@ -4,7 +4,7 @@ The diligence-studio server exposes a versioned HTTP API for importing PowerPoin
 browsing stored templates and previews, exporting canvas JSON to PowerPoint, and inserting
 generated slides into an existing deck.
 
-The existing API is served beneath `/api/v1`; asynchronous classified import is the single v2
+The existing API is served beneath `/api/v1`; synchronous classified import is the single v2
 endpoint. The local development server listens on
 `http://127.0.0.1:43127` by default. The Vite development server proxies `/api/v1` to that
 address.
@@ -30,14 +30,14 @@ untrusted callers.
   authentication; a trusted gateway must prevent callers from claiming another app's ID.
 
 The default limits are a 25 MiB PowerPoint upload, a 50 MiB JSON export body, a 10 MiB stored
-preview, and a 30-second request timeout. These can be changed with the server configuration
+preview, and a 90-second request timeout. These can be changed with the server configuration
 documented in [`server/README.md`](../../server/README.md).
 
 ## Endpoints
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/api/v2/import?kind=...` | Import one slide and atomically create pending retrieval work. |
+| `POST` | `/api/v2/import?kind=...` | Import one slide and wait for ready v2 metadata and two embeddings. |
 | `POST` | `/api/v1/import?kind=...` | Import a single-slide PowerPoint as one template. |
 | `POST` | `/api/v1/batchImport?kind=...` | Import every slide as a separate template. |
 | `GET` | `/api/v1/templates?kind=...` | List template metadata. |
@@ -79,9 +79,9 @@ Response headers:
 
 `POST /api/v1/batchImport?kind=diagram`
 
-The request format is the same as the single-slide import. Each source slide is persisted as an
-independent one-slide template. The operation is atomic: if persistence fails, no templates from
-the batch remain stored.
+The request format is the same as the single-slide import. Each source slide is stored as an
+independent one-slide template in the process-local in-memory database. The operation is atomic:
+if storage fails, no templates from the batch remain stored. Templates reset when the server exits.
 
 The response is `201 Created`:
 
@@ -118,14 +118,16 @@ body rejection, and exactly-one-slide rule as v1. Its `201 Created` body is an e
   "templateId": "8f0d...",
   "templateJson": { "presentation": {} },
   "warnings": [],
-  "retrieval": { "status": "pending" }
+  "retrieval": { "status": "ready" }
 }
 ```
 
-`retrieval.status` confirms durable work was committed; it does not mean classification has begun.
-The endpoint returns before classification and embedding. No public v2 read, query, status, retry,
-classification, embedding, batch-import, or backfill route exists. Existing v1 imports never create
-this work.
+`retrieval.status` confirms that validated classification metadata, FTS search content, and the
+subject and template-capability vectors were committed. The template is saved before provider
+processing starts, and the endpoint waits for all provider calls and the final metadata transaction. A failure after the
+initial save returns an error and leaves a failed classification record without partial retrieval
+metadata. No public v2 read, query, status, retry, classification, embedding, batch-import, or
+backfill route exists. Existing v1 imports never create this work.
 
 ### List templates
 
@@ -213,8 +215,8 @@ curl --request POST 'http://localhost:43127/api/v1/export' \
 
 The response is `200 OK` with a PowerPoint OOXML binary, an attachment filename derived from the
 presentation title, and `X-PowerPoint-Warning-Count`. The input may contain one or more slides.
-Image elements must use embedded base64 data URIs. Stored asset paths are resolved when the
-server can identify the referenced template asset.
+Image elements must use embedded base64 data URIs. In-memory template asset references are
+resolved when the server can identify the referenced template asset; filesystem paths are rejected.
 
 ### Insert into an existing deck
 
@@ -266,6 +268,9 @@ Common status and code combinations include:
 | `422` | `invalid_powerpoint`, `template_must_have_one_slide`, `powerpoint_has_no_slides`, `invalid_presentation_json`, `unsupported_image_source`, `invalid_target_powerpoint` | Input has the right transport format but cannot be processed. |
 | `499` | `request_cancelled` | The client disconnected or the request timed out during import. |
 | `500` | `internal_error` | Unexpected server failure. |
+| `502` | `classification_incomplete`, `classification_invalid_output`, `classification_missing_output`, `classification_refused`, `embedding_invalid_vector` | A provider response could not produce valid retrieval data. |
+| `503` | `slide_classification_unavailable`, `classification_rate_limited`, `classification_unavailable`, `embedding_rate_limited`, `embedding_unavailable` | Synchronous retrieval processing is disabled or temporarily unavailable. |
+| `504` | `classification_timeout`, `embedding_timeout` | A configured provider operation timed out. |
 
 Clients should use `error.code` for handling and display `error.message` as sanitized user-facing
 diagnostic text. The full implementation is in [`server/src/errors.ts`](../../server/src/errors.ts)

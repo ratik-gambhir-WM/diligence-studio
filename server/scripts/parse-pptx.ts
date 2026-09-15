@@ -1,87 +1,60 @@
-import path from 'node:path'
-
-import { importPowerPoint } from '../src/lib/import/PowerpointImporter'
+import { importPowerPointBytes } from '../src/lib/import/PowerpointImporter'
 import type { ThrownValue } from '../src/lib/shared/PowerpointTypes'
+import { readStdin, writeStdout } from './stdio'
 
 type CliOptions = {
-  embedAssets: boolean
-  inputPath?: string
-  outputPath?: string
   slide?: number
+  sourceName?: string
 }
 
 function parseCliOptions(args: string[]): CliOptions {
-  const positional: string[] = []
-  let embedAssets = false
   let slide: number | undefined
+  let sourceName: string | undefined
 
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index]
-    if (argument === '--embed-assets') {
-      embedAssets = true
-      continue
-    }
     if (argument === '--slide') {
-      const value = Number(args[index + 1])
-      if (!Number.isInteger(value) || value < 1) {
-        throw new Error('--slide must be followed by a positive whole slide number.')
-      }
-      slide = value
+      slide = parseSlide(args[index + 1])
       index += 1
       continue
     }
     if (argument.startsWith('--slide=')) {
-      const value = Number(argument.slice('--slide='.length))
-      if (!Number.isInteger(value) || value < 1) {
-        throw new Error('--slide must be a positive whole slide number.')
-      }
-      slide = value
+      slide = parseSlide(argument.slice('--slide='.length))
       continue
     }
-    if (argument.startsWith('-')) {
-      throw new Error(`Unknown option: ${argument}`)
+    if (argument === '--source-name') {
+      sourceName = args[index + 1]
+      if (!sourceName?.trim()) throw new Error('--source-name must be followed by a name.')
+      index += 1
+      continue
     }
-    positional.push(argument)
+    if (argument.startsWith('--source-name=')) {
+      sourceName = argument.slice('--source-name='.length)
+      if (!sourceName.trim()) throw new Error('--source-name must not be blank.')
+      continue
+    }
+    throw new Error(`Unknown option: ${argument}`)
   }
 
-  if (positional.length > 2) {
-    throw new Error('Expected an input .pptx and at most one output .json path.')
-  }
+  return { slide, sourceName }
+}
 
-  return {
-    embedAssets,
-    inputPath: positional[0],
-    outputPath: positional[1],
-    slide,
+function parseSlide(value: string | undefined) {
+  const slide = Number(value)
+  if (!Number.isInteger(slide) || slide < 1) {
+    throw new Error('--slide must be followed by a positive whole slide number.')
   }
+  return slide
 }
 
 async function main() {
   const options = parseCliOptions(process.argv.slice(2))
-  if (!options.inputPath) {
-    throw new Error(
-      [
-        'Usage: npm run pptx:to-json -- <deck.pptx> [output.json] [--slide N] [--embed-assets]',
-        '',
-        'Without --slide, every slide is written to one TemplateCanvas-compatible JSON file.',
-        'Images are written beside the JSON by default; --embed-assets makes the JSON self-contained.',
-      ].join('\n'),
-    )
-  }
+  const source = await readStdin(25 * 1024 * 1024)
+  const result = await importPowerPointBytes(source, options)
+  writeStdout(Buffer.from(`${JSON.stringify(result.jsonSpec, null, 2)}\n`))
 
-  const result = await importPowerPoint({
-    inputPath: options.inputPath,
-    outputPath: options.outputPath,
-    slide: options.slide,
-    embedAssets: options.embedAssets,
-  })
-
-  console.log(
-    `Wrote ${result.importedSlideCount} slide(s) to ${path.relative(process.cwd(), result.outputPath)}`,
-  )
-  console.log('Pass result.jsonSpec directly as template.jsonSpec when calling the library.')
   for (const warning of result.warnings) {
-    console.warn(`WARNING ${warning}`)
+    console.error(`WARNING ${warning}`)
   }
 }
 

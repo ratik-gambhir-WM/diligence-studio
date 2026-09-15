@@ -17,13 +17,21 @@ describe('slide classification contracts', () => {
   it('strictly validates and deterministically normalizes metadata', () => {
     expect(SlideRetrievalMetadataSchema.safeParse({ ...VALID_METADATA, extra: true }).success).toBe(false)
     expect(normalizeSlideRetrievalMetadata(VALID_METADATA)).toMatchObject({
-      slide_type: 'architecture-overview',
-      layout_type: 'diagram-led',
-      slide_purpose: 'Explain the platform architecture',
-      topics: ['Architecture', 'Integrations'],
+      communication: { intents: ['finding', 'evidence', 'recommendation'] },
+      subject: {
+        domains: [
+          { id: 'cybersecurity', relevance: 'primary', topics: ['security-testing'] },
+          { id: 'software-architecture', relevance: 'secondary', topics: ['extensibility'] },
+        ],
+        summary: 'A security testing architecture with data integrations.',
+      },
+      template_fit: { archetype: 'finding-evidence-recommendation' },
     })
-    expect(() => normalizeSlideRetrievalMetadata({ ...VALID_METADATA, has_chart: undefined })).toThrow()
-    expect(() => normalizeSlideRetrievalMetadata({ ...VALID_METADATA, topics: [''] })).toThrow()
+    expect(() => normalizeSlideRetrievalMetadata({ ...VALID_METADATA, visual: undefined })).toThrow()
+    expect(() => normalizeSlideRetrievalMetadata({
+      ...VALID_METADATA,
+      subject: { ...VALID_METADATA.subject, domains: [] },
+    })).toThrow()
   })
 
   it('builds a bounded digest that preserves facts but excludes image bytes', () => {
@@ -51,14 +59,14 @@ describe('slide classification contracts', () => {
   })
 
   it('migrates without backfilling and atomically creates and claims pending work', () => {
-    const repository = new SqliteTemplateRepository(':memory:')
+    const repository = new SqliteTemplateRepository()
     repository.ensureApp('app-one')
     repository.insert({ templateId: 'v1', templateJson: createTemplate('V1') }, [], undefined, undefined, 'app-one')
     expect(repository.findSlideClassification('v1')).toBeUndefined()
     repository.insertWithPendingClassification({
       assets: [],
       template: { templateId: 'v2', templateJson: createTemplate('V2') },
-    }, { inputFingerprint: 'fingerprint', promptVersion: 'prompt', schemaVersion: 1 }, 'app-one')
+    }, { inputFingerprint: 'fingerprint', promptVersion: 'prompt', schemaVersion: 2 }, 'app-one')
     expect(repository.findSlideClassification('v2')).toMatchObject({
       attemptCount: 0,
       embeddingStatus: 'not_ready',
@@ -74,13 +82,45 @@ describe('slide classification contracts', () => {
     repository.close()
   })
 
+  it('drops pre-v2 classification rows during schema migration without deleting templates', () => {
+    let inspectCounts: (() => unknown[]) | undefined
+    const migrated = new SqliteTemplateRepository((database) => {
+      database.exec(`
+        CREATE TABLE templates (
+          template_id TEXT PRIMARY KEY,
+          template_json TEXT NOT NULL CHECK (json_valid(template_json))
+        ) STRICT;
+        CREATE TABLE slide_classifications (
+          template_id TEXT PRIMARY KEY,
+          schema_version INTEGER NOT NULL,
+          status TEXT NOT NULL,
+          embedding_status TEXT NOT NULL,
+          FOREIGN KEY (template_id) REFERENCES templates(template_id) ON DELETE CASCADE
+        ) STRICT;
+        CREATE VIRTUAL TABLE slide_classifications_fts USING fts5(template_id UNINDEXED, title);
+        INSERT INTO templates VALUES ('legacy-template', json('{"presentation":{}}'));
+        INSERT INTO slide_classifications VALUES ('legacy-template', 1, 'ready', 'ready');
+        INSERT INTO slide_classifications_fts VALUES ('legacy-template', 'Legacy');
+        PRAGMA user_version = 4;
+      `)
+      inspectCounts = () => [
+        database.prepare('SELECT COUNT(*) AS count FROM templates').get(),
+        database.prepare('SELECT COUNT(*) AS count FROM slide_classifications').get(),
+        database.prepare('SELECT COUNT(*) AS count FROM slide_classifications_fts').get(),
+      ]
+    })
+    expect(migrated.findSlideClassification('legacy-template')).toBeUndefined()
+    expect(inspectCounts?.()).toEqual([{ count: 1 }, { count: 0 }, { count: 0 }])
+    migrated.close()
+  })
+
   it('processes classification and embedding as independent durable worker stages', async () => {
-    const repository = new SqliteTemplateRepository(':memory:')
+    const repository = new SqliteTemplateRepository()
     repository.ensureApp('app-one')
     repository.insertWithPendingClassification({
       assets: [],
       template: { templateId: 'worker-slide', templateJson: createTemplate() },
-    }, { inputFingerprint: 'input', promptVersion: 'prompt', schemaVersion: 1 }, 'app-one')
+    }, { inputFingerprint: 'input', promptVersion: 'prompt', schemaVersion: 2 }, 'app-one')
     let classifications = 0
     let embeddings = 0
     const service = new SlideClassificationService({
@@ -116,24 +156,25 @@ describe('slide classification contracts', () => {
     worker.start()
     await waitFor(() => repository.findSlideClassification('worker-slide')?.embeddingStatus === 'ready')
     await worker.stop()
-    expect({ classifications, embeddings }).toEqual({ classifications: 1, embeddings: 1 })
+    expect({ classifications, embeddings }).toEqual({ classifications: 1, embeddings: 2 })
     expect(repository.findSlideClassification('worker-slide')).toMatchObject({
       embeddingDimensions: 2,
       embeddingModel: 'embedding-model',
       embeddingStatus: 'ready',
       status: 'ready',
-      vector: [1, 0],
+      capabilityVector: [1, 0],
+      subjectVector: [1, 0],
     })
     repository.close()
   })
 
   it('rejects stale completion after a fingerprint refresh without erasing usable state', () => {
-    const repository = new SqliteTemplateRepository(':memory:')
+    const repository = new SqliteTemplateRepository()
     repository.ensureApp('app-one')
     repository.insertWithPendingClassification({
       assets: [],
       template: { templateId: 'refresh-slide', templateJson: createTemplate() },
-    }, { inputFingerprint: 'old-input', promptVersion: 'old-prompt', schemaVersion: 1 }, 'app-one')
+    }, { inputFingerprint: 'old-input', promptVersion: 'old-prompt', schemaVersion: 2 }, 'app-one')
     const claimed = repository.claimNextSlideClassification('2026-01-01', '2026-01-02')
     if (!claimed) throw new Error('Expected a classification job.')
     expect(repository.refreshPendingSlideClassification('refresh-slide', {
@@ -142,10 +183,12 @@ describe('slide classification contracts', () => {
     expect(() => repository.completeSlideClassification({
       classifiedAt: '2026-01-01',
       classifiedFingerprint: claimed.inputFingerprint,
-      embeddingDocument: 'document',
-      embeddingFingerprint: 'embedding',
+      capabilityEmbeddingDocument: 'capability document',
+      capabilityEmbeddingFingerprint: 'capability embedding',
       metadata: normalizeSlideRetrievalMetadata(VALID_METADATA),
       model: 'classification-model',
+      subjectEmbeddingDocument: 'subject document',
+      subjectEmbeddingFingerprint: 'subject embedding',
       templateId: 'refresh-slide',
     })).toThrow('lease is no longer active')
     expect(repository.findSlideClassification('refresh-slide')).toMatchObject({

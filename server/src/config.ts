@@ -1,10 +1,6 @@
 import { isIP } from 'node:net'
-import { existsSync } from 'node:fs'
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 
 export type ServerConfig = {
-  databasePath: string
   host: string
   openaiApiKey: string | null
   openaiSlideClassificationModel: string | null
@@ -14,18 +10,15 @@ export type ServerConfig = {
   maxPreviewBytes: number
   maxUploadBytes: number
   port: number
-  previewProvider: 'disabled' | 'headless' | 'quicklook'
+  previewProvider: 'disabled' | 'headless'
   previewRenderSize: number
   previewRenderUrl: string
   previewTimeoutMs: number
   requestTimeoutMs: number
-  slideClassificationConcurrency: number
-  slideClassificationMaxAttempts: number
   slideClassificationMaxImageBytes: number
   slideClassificationMaxTextChars: number
   slideClassificationProvider: 'disabled' | 'openai'
   slideClassificationTimeoutMs: number
-  slideEmbeddingMaxAttempts: number
   slideEmbeddingMaxTextBytes: number
   slideEmbeddingTimeoutMs: number
 }
@@ -33,16 +26,13 @@ export type ServerConfig = {
 const DEFAULT_MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 const DEFAULT_MAX_EXPORT_JSON_BYTES = 50 * 1024 * 1024
 const DEFAULT_PORT = 43127
-const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
+const DEFAULT_REQUEST_TIMEOUT_MS = 90_000
 const DEFAULT_PREVIEW_BYTES = 10 * 1024 * 1024
 const DEFAULT_PREVIEW_RENDER_SIZE = 1600
 const DEFAULT_PREVIEW_RENDER_URL = 'http://localhost:5173/_internal/template-preview'
 const DEFAULT_PREVIEW_TIMEOUT_MS = 15_000
 const DEFAULT_CLASSIFICATION_TIMEOUT_MS = 45_000
 const DEFAULT_EMBEDDING_TIMEOUT_MS = 20_000
-const QUICK_LOOK_PATH = '/usr/bin/qlmanage'
-const DEFAULT_DATABASE_PATH = fileURLToPath(new URL('../data/templates.sqlite', import.meta.url))
-
 export function loadServerConfig(environment: NodeJS.ProcessEnv = process.env): ServerConfig {
   const slideClassificationProvider = parseClassificationProvider(
     environment.SLIDE_CLASSIFICATION_PROVIDER,
@@ -61,9 +51,6 @@ export function loadServerConfig(environment: NodeJS.ProcessEnv = process.env): 
   }
 
   return {
-    databasePath: environment.SQLITE_DB_PATH
-      ? path.resolve(environment.SQLITE_DB_PATH)
-      : DEFAULT_DATABASE_PATH,
     host: parseHost(environment.HOST),
     openaiApiKey,
     openaiSlideClassificationModel,
@@ -96,17 +83,10 @@ export function loadServerConfig(environment: NodeJS.ProcessEnv = process.env): 
       DEFAULT_PREVIEW_TIMEOUT_MS,
       'TEMPLATE_PREVIEW_TIMEOUT_MS',
     ),
-    requestTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
-    slideClassificationConcurrency: parseBoundedPositiveInteger(
-      environment.SLIDE_CLASSIFICATION_CONCURRENCY,
-      1,
-      'SLIDE_CLASSIFICATION_CONCURRENCY',
-      8,
-    ),
-    slideClassificationMaxAttempts: parsePositiveInteger(
-      environment.SLIDE_CLASSIFICATION_MAX_ATTEMPTS,
-      3,
-      'SLIDE_CLASSIFICATION_MAX_ATTEMPTS',
+    requestTimeoutMs: parsePositiveInteger(
+      environment.REQUEST_TIMEOUT_MS,
+      DEFAULT_REQUEST_TIMEOUT_MS,
+      'REQUEST_TIMEOUT_MS',
     ),
     slideClassificationMaxImageBytes: parsePositiveInteger(
       environment.SLIDE_CLASSIFICATION_MAX_IMAGE_BYTES,
@@ -123,11 +103,6 @@ export function loadServerConfig(environment: NodeJS.ProcessEnv = process.env): 
       environment.SLIDE_CLASSIFICATION_TIMEOUT_MS,
       DEFAULT_CLASSIFICATION_TIMEOUT_MS,
       'SLIDE_CLASSIFICATION_TIMEOUT_MS',
-    ),
-    slideEmbeddingMaxAttempts: parsePositiveInteger(
-      environment.SLIDE_EMBEDDING_MAX_ATTEMPTS,
-      3,
-      'SLIDE_EMBEDDING_MAX_ATTEMPTS',
     ),
     slideEmbeddingMaxTextBytes: parsePositiveInteger(
       environment.SLIDE_EMBEDDING_MAX_TEXT_BYTES,
@@ -155,13 +130,10 @@ function nonBlank(value: string | undefined) {
   return normalized ? normalized : null
 }
 
-function parsePreviewProvider(value: string | undefined): 'disabled' | 'headless' | 'quicklook' {
+function parsePreviewProvider(value: string | undefined): 'disabled' | 'headless' {
   const provider = value ?? 'headless'
-  if (provider !== 'disabled' && provider !== 'headless' && provider !== 'quicklook') {
-    throw new Error('TEMPLATE_PREVIEW_PROVIDER must be headless, quicklook, or disabled.')
-  }
-  if (provider === 'quicklook' && !existsSync(QUICK_LOOK_PATH)) {
-    return 'disabled'
+  if (provider !== 'disabled' && provider !== 'headless') {
+    throw new Error('TEMPLATE_PREVIEW_PROVIDER must be headless or disabled.')
   }
   return provider
 }
@@ -231,17 +203,6 @@ function parsePositiveInteger(value: string | undefined, fallback: number, name:
 function parseOptionalPositiveInteger(value: string | undefined, name: string) {
   if (value === undefined) return undefined
   return parsePositiveInteger(value, 1, name)
-}
-
-function parseBoundedPositiveInteger(
-  value: string | undefined,
-  fallback: number,
-  name: string,
-  maximum: number,
-) {
-  const result = parsePositiveInteger(value, fallback, name)
-  if (result > maximum) throw new Error(`${name} must be at most ${maximum}.`)
-  return result
 }
 
 function parseUnsignedInteger(value: string) {

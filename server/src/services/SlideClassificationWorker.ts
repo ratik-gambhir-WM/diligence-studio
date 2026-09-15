@@ -16,6 +16,10 @@ export type SlideClassificationWorkerOptions = {
   service: SlideClassificationService
 }
 
+/**
+ * Dormant compatibility implementation. The server intentionally does not construct this worker;
+ * import v2 now awaits classification, embedding, and atomic in-memory storage itself.
+ */
 export class SlideClassificationWorker {
   readonly #abortController = new AbortController()
   readonly #active = new Set<Promise<void>>()
@@ -35,7 +39,7 @@ export class SlideClassificationWorker {
     this.#retryBaseMs = options.retryBaseMs ?? 1_000
   }
 
-  /** Start lightweight polling and immediately check for durable work. */
+  /** Start lightweight polling and immediately check for queued work. */
   start() {
     if (this.#pollTimer || this.#stopping) return
     this.#pollTimer = setInterval(() => this.notify(), 1_000)

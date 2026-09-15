@@ -3,8 +3,14 @@
 This package is the Node-only sibling of the React app in `../web`. It keeps its PowerPoint
 implementation under `src/lib`; nothing in this package enters the React/Vite module graph.
 Uploaded `.pptx` files are OOXML ZIP packages. Their
-compact canvas JSON is stored in SQLite. Imported image bytes are stored separately from the JSON
-as BLOB assets. Template metadata and first-slide PNG previews are stored in dedicated tables.
+compact canvas JSON is stored in an in-memory SQLite database. Imported image bytes are stored
+separately from the JSON as in-memory BLOB assets. Template metadata and first-slide PNG previews
+are stored in dedicated in-memory tables for the life of the server process.
+HTTP imports parse the bounded request `Buffer` directly. The headless preview provider renders
+normalized canvas JSON and never writes the uploaded presentation to disk. HTTP export and deck
+insertion likewise return byte arrays assembled in memory. Developer CLIs use stdin/stdout and do
+not accept input or output filesystem paths. The checked-in built-in catalog is read-only startup
+input; the running server creates no application data or conversion artifacts on disk.
 Apps are registered in `apps`, and `app_templates` controls which templates each app can access.
 The checked-in diagram and commentary catalog is seeded transactionally and idempotently at startup.
 
@@ -21,32 +27,31 @@ Configuration is read once at startup:
 
 - `PORT` defaults to `43127`.
 - `HOST` defaults to `0.0.0.0` and must be an IP address.
-- `SQLITE_DB_PATH` defaults to `server/data/templates.sqlite` from the repository root.
 - `MAX_PPTX_UPLOAD_BYTES` defaults to `26214400` (25 MiB).
 - `MAX_EXPORT_JSON_BYTES` defaults to `52428800` (50 MiB).
-- `TEMPLATE_PREVIEW_PROVIDER` defaults to `headless`. It accepts `headless`, `quicklook`, or
-  `disabled`.
+- `TEMPLATE_PREVIEW_PROVIDER` defaults to `headless`. It accepts `headless` or `disabled`.
 - `TEMPLATE_PREVIEW_RENDER_SIZE` defaults to `1600` pixels.
 - `TEMPLATE_PREVIEW_RENDER_URL` defaults to
   `http://localhost:5173/_internal/template-preview`. It must point to the Vite app (or the deployed
   web app) while imports are running.
 - `TEMPLATE_PREVIEW_TIMEOUT_MS` defaults to `15000`.
 - `MAX_TEMPLATE_PREVIEW_BYTES` defaults to `10485760` (10 MiB).
+- `REQUEST_TIMEOUT_MS` defaults to `90000` so a synchronous v2 import can finish preview,
+  classification, embedding, and in-memory storage.
 - `SLIDE_CLASSIFICATION_PROVIDER` is `disabled` by default and may be set to `openai`.
 - When classification is enabled, `OPENAI_API_KEY`, `OPENAI_SLIDE_CLASSIFICATION_MODEL`, and
   `OPENAI_SLIDE_EMBEDDING_MODEL` are required. Use `text-embedding-3-small` for the initial pilot;
   `OPENAI_SLIDE_EMBEDDING_DIMENSIONS` is optional.
 - `SLIDE_CLASSIFICATION_TIMEOUT_MS` and `SLIDE_EMBEDDING_TIMEOUT_MS` default to `45000` and
-  `20000`. `SLIDE_CLASSIFICATION_MAX_ATTEMPTS` and `SLIDE_EMBEDDING_MAX_ATTEMPTS` default to `3`.
+  `20000`.
 - `SLIDE_CLASSIFICATION_MAX_TEXT_CHARS`, `SLIDE_CLASSIFICATION_MAX_IMAGE_BYTES`, and
   `SLIDE_EMBEDDING_MAX_TEXT_BYTES` default to `12000`, `5242880`, and `32000`.
-- `SLIDE_CLASSIFICATION_CONCURRENCY` defaults to `1` and is capped at `8`.
 
 The API key is read only by the server and must never be exposed through a `VITE_*` value. Provider
 requests and routine logs omit slide content, previews, raw provider responses, and credentials.
 
-Requests time out after 30 seconds. Compressed request bodies are rejected. Template, import, and
-export requests accept an `X-App-Id` header (or `appId` query parameter) and fall back to
+Requests time out after 90 seconds by default. Compressed request bodies are rejected. Template,
+import, and export requests accept an `X-App-Id` header (or `appId` query parameter) and fall back to
 `DiligenceStudio_WestMonroe` for legacy callers. App IDs provide basic data segregation, not
 authentication.
 
@@ -60,16 +65,16 @@ The default preview provider launches Chromium headlessly, injects normalized sl
 the preview page loads, and screenshots only the read-only SVG slide surface. No browser window is
 shown. The renderer blocks requests to origins other than the configured web-app origin. Run the
 web app and API together during local imports; production must expose the internal preview route
-at `TEMPLATE_PREVIEW_RENDER_URL`. `quicklook` remains available as an explicit compatibility
-fallback on macOS, but it renders the uploaded PowerPoint rather than the normalized canvas model.
+at `TEMPLATE_PREVIEW_RENDER_URL`.
 
 ## API
 
-### Import v2 for asynchronous retrieval indexing
+### Import v2 for synchronous retrieval indexing
 
 `POST /api/v2/import?kind=diagram|commentary` accepts the same bounded raw single-slide PowerPoint
-body as v1. It atomically stores the template and durable pending classification work, then returns
-`201` without waiting for OpenAI:
+body as v1. It stores the template first, then waits for classification and two embeddings. It
+returns `201` only after v2 classification metadata, FTS content, and the subject and template-
+capability vectors are committed together:
 
 ```json
 {
@@ -77,15 +82,20 @@ body as v1. It atomically stores the template and durable pending classification
   "templateId": "template-123",
   "templateJson": { "presentation": {} },
   "warnings": [],
-  "retrieval": { "status": "pending" }
+  "retrieval": { "status": "ready" }
 }
 ```
 
-Pending work remains durable when the provider is disabled. Existing v1 import, batch import,
-built-in seeding, and existing templates do not create classification work. There are no public
+The endpoint returns `503` before conversion when the provider is disabled. If provider processing
+fails after the template is saved, the request fails and the stored classification record is marked
+failed without publishing partial metadata or a vector. Existing v1 import, batch import, built-in
+seeding, and existing templates do not create classification work. There are no public
 classification, status, retry, backfill, or retrieval routes. Retrieval is available only through
 the app-bound in-process `SlideRetrievalService`/Agent adapter; semantic and hybrid text search are
-the only query modes that may call the embedding provider.
+the only query modes that may call the embedding provider. The adapter also exposes
+`find_slides_for_finding({ markdown, limit })`, which independently ranks subject relevance and
+template capability, applies exact domain/topic/intent/content-slot boosts, and returns match
+reasons without exposing vectors or cross-app templates.
 
 Import a deck by sending its binary `.pptx` body:
 
@@ -116,12 +126,11 @@ curl --request POST 'http://localhost:43127/api/v1/batchImport?kind=diagram' \
 
 The `201` response contains `templates`, with one `templateId`, `templateJson`, and
 `previewAvailable` entry for every source slide, plus an aggregate `warnings` array. Every
-`templateJson` contains exactly one slide and is persisted with its own metadata, image assets,
+`templateJson` contains exactly one slide and is stored with its own metadata, image assets,
 and preview. Its presentation title is the source slide's derived name. `X-Imported-Template-Count`
 reports the number stored. The complete batch is committed atomically, so a database failure does
-not leave a partially imported deck. The default headless preview provider renders every slide;
-the Quick Look compatibility provider can preview only the first slide and reports later previews
-as unavailable rather than storing an incorrect image.
+not leave a partially imported deck. The headless preview provider renders every slide from its
+normalized JSON without writing presentation bytes to disk.
 
 `GET /api/v1/templates/:templateId` returns that same canvas JSON body.
 `GET /api/v1/import/:templateId` is a
@@ -179,19 +188,22 @@ Errors use this shape:
 }
 ```
 
-SQLite uses strict, versioned schema migrations. `templates` stores `template_id TEXT PRIMARY KEY` and a
+SQLite runs only as an in-memory database and resets when the server process exits. It uses strict,
+versioned schema migrations. `templates` stores `template_id TEXT PRIMARY KEY` and a
 JSON-validated `template_json TEXT`. `template_assets` stores each image as an `asset_data BLOB`
 under an `asset_id TEXT PRIMARY KEY`, with `template_id` as a foreign key back to `templates`.
 `template_metadata` owns picker metadata and built-in checksums; `template_previews` owns PNG bytes
 and dimensions. `apps` stores the unique app ID, display name, JSON metadata, and first/last-seen
 timestamps; `app_templates` stores app-to-template access. Template, metadata, asset, preview, and
 app-access inserts are committed in one transaction.
-Schema version 4 adds `slide_classifications` plus an FTS5 index. Classification and embedding use
-separate statuses, attempts, leases, fingerprints, and sanitized error codes. Vectors are validated
-little-endian Float32 BLOBs. The pilot scores app-scoped candidate vectors in process; measure query
+Schema version 5 stores separate subject and template-capability documents, fingerprints, and
+vectors in `slide_classifications`, and rebuilds the FTS5 index around the v2 metadata sections.
+Migration deletes pre-v2 classification rows and their search index entries while preserving the
+underlying templates and assets; those templates require explicit reclassification. Vectors are
+validated little-endian Float32 BLOBs. The pilot scores app-scoped candidate vectors in process; measure query
 latency and evaluate a supported vector extension or dedicated store before using this design for a
 large catalog. Re-evaluate the in-process scan before an app exceeds 5,000 compatible vectors or
 when measured retrieval p95 exceeds 200 ms, whichever comes first.
-File-backed databases use SQLite WAL
-mode. Existing templates that still contain embedded base64 images or nonpositive canvas
+SQLite journals and temporary tables remain in memory. Existing templates that still contain
+embedded base64 images or nonpositive canvas
 dimensions are migrated transactionally when they are first retrieved.

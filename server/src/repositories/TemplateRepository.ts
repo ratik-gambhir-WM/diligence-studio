@@ -82,8 +82,9 @@ export type StoredSlideClassification = {
   classifiedFingerprint: string | null
   embeddingAttemptCount: number
   embeddingDimensions: number | null
-  embeddingDocument: string | null
-  embeddingFingerprint: string | null
+  capabilityEmbeddingDocument: string | null
+  capabilityEmbeddingFingerprint: string | null
+  capabilityVector: readonly number[] | null
   embeddingLastErrorCode: string | null
   embeddingModel: string | null
   embeddingNextAttemptAt: string | null
@@ -97,7 +98,9 @@ export type StoredSlideClassification = {
   schemaVersion: number
   status: SlideClassificationStatus
   templateId: string
-  vector: readonly number[] | null
+  subjectEmbeddingDocument: string | null
+  subjectEmbeddingFingerprint: string | null
+  subjectVector: readonly number[] | null
 }
 
 export type SlideClassificationJob = {
@@ -111,8 +114,10 @@ export type SlideClassificationJob = {
 
 export type SlideEmbeddingJob = {
   attemptCount: number
-  document: string
-  fingerprint: string
+  capabilityDocument: string
+  capabilityFingerprint: string
+  subjectDocument: string
+  subjectFingerprint: string
   templateId: string
 }
 
@@ -126,13 +131,22 @@ export type RetrievalClassificationRecord = {
 }
 
 export type CompleteSlideClassification = {
+  capabilityEmbeddingDocument: string
+  capabilityEmbeddingFingerprint: string
   classifiedAt: string
   classifiedFingerprint: string
-  embeddingDocument: string
-  embeddingFingerprint: string
   metadata: SlideRetrievalMetadata
   model: string
+  subjectEmbeddingDocument: string
+  subjectEmbeddingFingerprint: string
   templateId: string
+}
+
+export type CompleteSlideProcessing = CompleteSlideClassification & {
+  capabilityVector: readonly number[]
+  embeddingDimensions: number
+  embeddingModel: string
+  subjectVector: readonly number[]
 }
 
 export interface TemplateRepository {
@@ -145,11 +159,15 @@ export interface TemplateRepository {
   /** Store one validated vector when the claimed embedding fingerprint is still current. */
   completeSlideEmbedding(
     templateId: string,
-    fingerprint: string,
-    vector: readonly number[],
+    subjectFingerprint: string,
+    capabilityFingerprint: string,
+    subjectVector: readonly number[],
+    capabilityVector: readonly number[],
     model: string,
     dimensions: number,
   ): void
+  /** Atomically publish classification metadata, FTS content, and its validated embedding. */
+  completeSlideProcessing(result: CompleteSlideProcessing): void
   delete(templateId: string, appId?: string): boolean
   ensureApp(appId: string, registration?: AppRegistration): StoredApp
   findApp(appId: string): StoredApp | undefined
@@ -168,6 +186,12 @@ export interface TemplateRepository {
   insertMany(records: readonly TemplateInsert[], appId?: string): void
   /** Insert a template and its initial pending classification row in one transaction. */
   insertWithPendingClassification(
+    record: TemplateInsert,
+    pending: PendingSlideClassification,
+    appId?: string,
+  ): void
+  /** Insert a template with a classification pipeline already owned by its import request. */
+  insertWithProcessingClassification(
     record: TemplateInsert,
     pending: PendingSlideClassification,
     appId?: string,
@@ -196,8 +220,10 @@ export interface TemplateRepository {
   /** Schedule re-embedding without invalidating still-usable lexical metadata. */
   refreshPendingSlideEmbedding(
     templateId: string,
-    document: string,
-    fingerprint: string,
+    subjectDocument: string,
+    subjectFingerprint: string,
+    capabilityDocument: string,
+    capabilityFingerprint: string,
   ): boolean
   /** Execute a pre-sanitized FTS5 expression within an app's authorized template set. */
   searchSlideClassifications(appId: string, ftsQuery: string, limit: number): string[]

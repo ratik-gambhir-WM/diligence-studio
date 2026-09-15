@@ -1,4 +1,3 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import JSZip from 'jszip'
 import {
@@ -28,8 +27,8 @@ import {
 } from './PowerpointGeometry'
 import type {
   ExtractedElementRecord,
-  ImportPowerPointOptions,
-  ImportPowerPointResult,
+  ImportedPowerPoint,
+  ImportPowerPointBytesOptions,
   PlaceholderSourceIndex,
   SlideSize,
   TransformMatrix,
@@ -65,8 +64,8 @@ import {
 } from './PowerpointXml'
 
 export type {
-  ImportPowerPointOptions,
-  ImportPowerPointResult,
+  ImportedPowerPoint,
+  ImportPowerPointBytesOptions,
   PowerPointCanvasJson,
 } from './PowerpointImportTypes'
 
@@ -76,28 +75,32 @@ export type {
  * accepted by the existing JSON-to-PowerPoint exporter.
  */
 
-const DEFAULT_OUTPUT_SUFFIX = '.canvas.json'
-
-/**
- * Imports a PowerPoint deck into the compact object consumed by TemplateCanvas.
- * This is the single public entry point; the OOXML parsing helpers below remain
- * private implementation details.
- */
-export async function importPowerPoint(
-  options: ImportPowerPointOptions,
-): Promise<ImportPowerPointResult> {
-  if (!options.inputPath.trim()) {
-    throw new Error('inputPath is required.')
+/** Import PowerPoint OOXML bytes and keep images embedded in the returned JSON. */
+export async function importPowerPointBytes(
+  source: Buffer,
+  options: ImportPowerPointBytesOptions = {},
+): Promise<ImportedPowerPoint> {
+  validateSlideNumber(options.slide)
+  if (!Buffer.isBuffer(source) || source.length === 0) {
+    throw new Error('PowerPoint source bytes are required.')
   }
-  if (options.slide !== undefined && (!Number.isInteger(options.slide) || options.slide < 1)) {
-    throw new Error('slide must be a positive whole slide number.')
-  }
+  const sourceName = normalizeSourceName(options.sourceName)
+  return importPowerPointSource(source, {
+    slide: options.slide,
+    sourcePptx: sourceName,
+  })
+}
 
-  const workingDirectory = path.resolve(options.workingDirectory ?? process.cwd())
-  const inputPath = path.resolve(workingDirectory, options.inputPath)
-  const outputPath = resolveJsonOutputPath(inputPath, options.outputPath, workingDirectory)
-  const outputDir = path.dirname(outputPath)
-  const zip = await JSZip.loadAsync(await readFile(inputPath))
+type ImportPowerPointSourceOptions = {
+  slide?: number
+  sourcePptx: string
+}
+
+async function importPowerPointSource(
+  source: Buffer,
+  options: ImportPowerPointSourceOptions,
+): Promise<ImportedPowerPoint> {
+  const zip = await JSZip.loadAsync(source)
   const presentationXml = await readZipText(zip, 'ppt/presentation.xml')
   const presentationRels = parseRelationships(
     await readZipText(zip, 'ppt/_rels/presentation.xml.rels'),
@@ -117,19 +120,14 @@ export async function importPowerPoint(
   if (options.slide && selectedSlides.length === 0) {
     throw new Error(`Slide ${options.slide} does not exist. The deck has ${slidePaths.length} slide(s).`)
   }
-
-  await mkdir(outputDir, { recursive: true })
-
   const warnings: string[] = []
   const normalizedSlides: NormalizedPresentation['slides'] = []
-  let deckTitle = path.basename(inputPath, path.extname(inputPath))
+  let deckTitle = path.basename(options.sourcePptx, path.extname(options.sourcePptx))
 
   for (const slidePath of selectedSlides) {
     const slideNumber = slidePaths.indexOf(slidePath) + 1
-    const extracted = await extractSlide(zip, inputPath, slidePath, slideNumber, slideSize)
-    const { presentation, issues } = normalizePresentationSpec(extracted, {
-      baseDir: outputDir,
-    })
+    const extracted = await extractSlide(zip, options.sourcePptx, slidePath, slideNumber, slideSize)
+    const { presentation, issues } = normalizePresentationSpec(extracted)
     const errors = issues.filter((issue) => issue.level === 'error')
 
     if (!presentation || errors.length) {
@@ -152,22 +150,18 @@ export async function importPowerPoint(
     }
   }
 
-  const compact = await compactPresentation(
-    {
-      meta: {
-        title: deckTitle,
-        width: slideSize.widthPx,
-        height: slideSize.heightPx,
-        preserveElementOrder: true,
-        showBranding: false,
-        sourceType: 'native-presentation',
-      },
-      slides: normalizedSlides,
+  const compact = compactPresentation({
+    meta: {
+      title: deckTitle,
+      width: slideSize.widthPx,
+      height: slideSize.heightPx,
+      preserveElementOrder: true,
+      showBranding: false,
+      sourceType: 'native-presentation',
     },
-    outputPath,
-    { embedAssets: options.embedAssets },
-  )
-  const roundTrip = normalizePresentationSpec(compact, { baseDir: outputDir })
+    slides: normalizedSlides,
+  })
+  const roundTrip = normalizePresentationSpec(compact)
   const roundTripErrors = roundTrip.issues.filter((issue) => issue.level === 'error')
   if (!roundTrip.presentation || roundTripErrors.length) {
     throw new Error(
@@ -176,11 +170,7 @@ export async function importPowerPoint(
         .join('\n')}`,
     )
   }
-  await writeFile(outputPath, `${JSON.stringify(compact, null, 2)}\n`, 'utf8')
-
   return {
-    inputPath,
-    outputPath,
     jsonSpec: compact,
     warnings,
     sourceSlideCount: slidePaths.length,
@@ -188,27 +178,16 @@ export async function importPowerPoint(
   }
 }
 
-function resolveJsonOutputPath(
-  inputPath: string,
-  outputArg: string | undefined,
-  workingDirectory: string,
-) {
-  if (!outputArg) {
-    return path.join(
-      path.dirname(inputPath),
-      `${path.basename(inputPath, path.extname(inputPath))}${DEFAULT_OUTPUT_SUFFIX}`,
-    )
+function validateSlideNumber(slide: number | undefined) {
+  if (slide !== undefined && (!Number.isInteger(slide) || slide < 1)) {
+    throw new Error('slide must be a positive whole slide number.')
   }
+}
 
-  const resolved = path.resolve(workingDirectory, outputArg)
-  if (path.extname(resolved).toLowerCase() === '.json') {
-    return resolved
-  }
-
-  return path.join(
-    resolved,
-    `${path.basename(inputPath, path.extname(inputPath))}${DEFAULT_OUTPUT_SUFFIX}`,
-  )
+function normalizeSourceName(value: string | undefined) {
+  const sourceName = value ?? 'upload.pptx'
+  if (!sourceName.trim()) throw new Error('sourceName must not be blank.')
+  return path.basename(sourceName)
 }
 
 async function extractSlide(

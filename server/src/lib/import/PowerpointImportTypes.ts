@@ -230,24 +230,16 @@ export type PowerPointCanvasJson = {
   }
 }
 
-export type ImportPowerPointOptions = {
-  /** Path to the source .pptx. Relative paths resolve from workingDirectory. */
-  inputPath: string
-  /** JSON file or destination directory. Defaults beside the source deck. */
-  outputPath?: string
+export type ImportPowerPointBytesOptions = {
+  /** Logical source name used for the presentation title. */
+  sourceName?: string
   /** One-based slide number. Omit to import the complete deck. */
   slide?: number
-  /** Keep image data in the returned JSON instead of writing an assets directory. */
-  embedAssets?: boolean
-  /** Base directory for relative input and output paths. Defaults to process.cwd(). */
-  workingDirectory?: string
 }
 
-export type ImportPowerPointResult = {
-  inputPath: string
-  outputPath: string
-  jsonSpec: PowerPointCanvasJson
-  warnings: string[]
-  sourceSlideCount: number
+export type ImportedPowerPoint = {
   importedSlideCount: number
+  jsonSpec: PowerPointCanvasJson
+  sourceSlideCount: number
+  warnings: string[]
 }

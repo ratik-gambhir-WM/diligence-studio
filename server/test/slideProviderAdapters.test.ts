@@ -36,7 +36,7 @@ describe('OpenAI slide provider adapters', () => {
       preview: { bytes: Buffer.from('png'), contentType: 'image/png' },
     }, signal)
 
-    expect(result.slide_type).toBe('architecture-overview')
+    expect(result.subject.domains[0]).toMatchObject({ id: 'cybersecurity', relevance: 'primary' })
     expect(body).toMatchObject({
       max_output_tokens: 900,
       model: 'configured-classifier',
