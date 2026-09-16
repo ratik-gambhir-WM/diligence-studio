@@ -20,6 +20,14 @@ import {
   HeadlessTemplatePreviewGenerator,
 } from './services/TemplatePreview'
 
+try {
+  process.loadEnvFile(new URL('../.env', import.meta.url))
+} catch (error) {
+  if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) {
+    throw error
+  }
+}
+
 const config = loadServerConfig()
 const templates = new SqliteTemplateRepository()
 await seedBuiltinTemplates(templates)

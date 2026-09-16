@@ -64,6 +64,7 @@ describe('POST /api/v2/import', () => {
       .expect(201)
 
     expect(response.body).toEqual({
+      metadata: normalizeSlideRetrievalMetadata(VALID_METADATA),
       previewAvailable: false,
       retrieval: { status: 'ready' },
       templateId: 'template-v2',

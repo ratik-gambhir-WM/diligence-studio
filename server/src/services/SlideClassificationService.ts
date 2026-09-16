@@ -7,7 +7,10 @@ import {
   buildSlideEmbeddingDocuments,
   buildSlideEmbeddingFingerprint,
 } from '../lib/retrieval/SlideEmbeddingDocument'
-import { assertContentSlotsExist } from '../lib/retrieval/SlideRetrievalMetadata'
+import {
+  assertContentSlotsExist,
+  type SlideRetrievalMetadata,
+} from '../lib/retrieval/SlideRetrievalMetadata'
 import type {
   SlideClassificationJob,
   SlideEmbeddingJob,
@@ -29,7 +32,10 @@ export class SlideClassificationService {
   constructor(private readonly options: SlideClassificationServiceOptions) {}
 
   /** Classify and embed one saved slide, then publish every retrieval artifact atomically. */
-  async process(job: SlideClassificationJob, signal?: AbortSignal) {
+  async process(
+    job: SlideClassificationJob,
+    signal?: AbortSignal,
+  ): Promise<SlideRetrievalMetadata> {
     const prepared = await this.#classify(job, signal)
     const [subject, capability] = await Promise.all([
       this.#embed(prepared.subjectEmbeddingDocument, signal),
@@ -47,6 +53,7 @@ export class SlideClassificationService {
       subjectVector: subject.vector,
       templateId: job.template.templateId,
     })
+    return prepared.metadata
   }
 
   /** Background-worker compatibility path; synchronous imports call process instead. */

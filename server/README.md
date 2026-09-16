@@ -74,10 +74,17 @@ at `TEMPLATE_PREVIEW_RENDER_URL`.
 `POST /api/v2/import?kind=diagram|commentary` accepts the same bounded raw single-slide PowerPoint
 body as v1. It stores the template first, then waits for classification and two embeddings. It
 returns `201` only after v2 classification metadata, FTS content, and the subject and template-
-capability vectors are committed together:
+capability vectors are committed together (abbreviated example):
 
 ```json
 {
+  "metadata": {
+    "subject": {},
+    "communication": {},
+    "template_fit": {},
+    "visual": {},
+    "retrieval_keywords": []
+  },
   "previewAvailable": true,
   "templateId": "template-123",
   "templateJson": { "presentation": {} },
@@ -86,7 +93,8 @@ capability vectors are committed together:
 }
 ```
 
-The endpoint returns `503` before conversion when the provider is disabled. If provider processing
+`metadata` is the normalized classification metadata committed for the returned template. The
+endpoint returns `503` before conversion when the provider is disabled. If provider processing
 fails after the template is saved, the request fails and the stored classification record is marked
 failed without publishing partial metadata or a vector. Existing v1 import, batch import, built-in
 seeding, and existing templates do not create classification work. There are no public

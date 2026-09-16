@@ -14,6 +14,7 @@ import {
 import {
   SLIDE_CLASSIFICATION_PROMPT_VERSION,
   SLIDE_CLASSIFICATION_SCHEMA_VERSION,
+  type SlideRetrievalMetadata,
 } from '../lib/retrieval/SlideRetrievalMetadata'
 import type {
   TemplateInsert,
@@ -74,6 +75,7 @@ export type BatchImportResponse = {
 }
 
 export type ImportV2Response = {
+  metadata: SlideRetrievalMetadata
   previewAvailable: boolean
   retrieval: { status: 'ready' }
   templateId: string
@@ -117,11 +119,12 @@ export class ImportService {
       )
     }
     const result = await this.#importSingle(source, kind, signal, appId, true)
+    let metadata: SlideRetrievalMetadata
     try {
       if (!result.classificationJob) {
         throw new Error('The v2 import did not create synchronous classification input.')
       }
-      await this.classificationService.process(result.classificationJob, signal)
+      metadata = await this.classificationService.process(result.classificationJob, signal)
     } catch (error) {
       const errorCode = signal?.aborted
         ? 'request_cancelled'
@@ -130,6 +133,7 @@ export class ImportService {
       throw toSynchronousProcessingError(error, signal)
     }
     return {
+      metadata,
       previewAvailable: result.previewAvailable,
       retrieval: { status: 'ready' },
       templateId: result.templateId,

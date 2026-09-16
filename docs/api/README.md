@@ -110,10 +110,18 @@ The response is `201 Created`:
 ### Import one slide for retrieval indexing
 
 `POST /api/v2/import?kind=diagram` uses the same content type, app scope, upload limit, compressed
-body rejection, and exactly-one-slide rule as v1. Its `201 Created` body is an envelope:
+body rejection, and exactly-one-slide rule as v1. Its `201 Created` body is an envelope
+(abbreviated example):
 
 ```json
 {
+  "metadata": {
+    "subject": {},
+    "communication": {},
+    "template_fit": {},
+    "visual": {},
+    "retrieval_keywords": []
+  },
   "previewAvailable": true,
   "templateId": "8f0d...",
   "templateJson": { "presentation": {} },
@@ -122,6 +130,7 @@ body rejection, and exactly-one-slide rule as v1. Its `201 Created` body is an e
 }
 ```
 
+`metadata` contains the normalized classification metadata associated with `templateJson`.
 `retrieval.status` confirms that validated classification metadata, FTS search content, and the
 subject and template-capability vectors were committed. The template is saved before provider
 processing starts, and the endpoint waits for all provider calls and the final metadata transaction. A failure after the
