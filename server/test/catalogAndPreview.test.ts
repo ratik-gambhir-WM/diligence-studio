@@ -7,6 +7,7 @@ import type { PowerPointCanvasJson } from '../src/lib/import/PowerpointImportTyp
 import { SqliteTemplateRepository } from '../src/repositories/SqliteTemplateRepository'
 import {
   HeadlessTemplatePreviewGenerator,
+  QuarryTemplatePreviewGenerator,
   readPngDimensions,
 } from '../src/services/TemplatePreview'
 
@@ -135,5 +136,26 @@ describe('template preview validation', () => {
     releaseFirst?.()
     await Promise.all([first, second])
     expect(calls).toBe(2)
+  })
+
+  it('uses the same validation and output contract for Quarry previews', async () => {
+    const generator = new QuarryTemplatePreviewGenerator(
+      {
+        maxBytes: 1024,
+        maxDimension: 100,
+        renderSize: 80,
+        renderUrl: 'http://127.0.0.1:1420/_internal/template-preview',
+        timeoutMs: 1000,
+      },
+      async (templateJson, options) => {
+        expect(templateJson).toBe(EMPTY_TEMPLATE)
+        expect(options.renderUrl).toBe('http://127.0.0.1:1420/_internal/template-preview')
+        return ONE_PIXEL_PNG
+      },
+    )
+
+    await expect(generator.generate({
+      templateJson: EMPTY_TEMPLATE,
+    })).resolves.toMatchObject({ bytes: ONE_PIXEL_PNG, height: 1, width: 1 })
   })
 })

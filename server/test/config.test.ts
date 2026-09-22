@@ -13,9 +13,8 @@ describe('server configuration', () => {
       HOST: '127.0.0.1',
       PORT: '4321',
       REQUEST_TIMEOUT_MS: '120000',
-      TEMPLATE_PREVIEW_PROVIDER: 'disabled',
       TEMPLATE_PREVIEW_RENDER_SIZE: '1200',
-      TEMPLATE_PREVIEW_RENDER_URL: 'https://preview.example.test/_internal/template-preview',
+      QUARRY_TEMPLATE_PREVIEW_RENDER_URL: 'https://quarry-preview.example.test/_internal/template-preview',
       TEMPLATE_PREVIEW_TIMEOUT_MS: '5000',
     })).toEqual({
       host: '127.0.0.1',
@@ -27,9 +26,8 @@ describe('server configuration', () => {
       maxPreviewBytes: 2048,
       maxUploadBytes: 4096,
       port: 4321,
-      previewProvider: 'disabled',
       previewRenderSize: 1200,
-      previewRenderUrl: 'https://preview.example.test/_internal/template-preview',
+      quarryPreviewRenderUrl: 'https://quarry-preview.example.test/_internal/template-preview',
       previewTimeoutMs: 5000,
       requestTimeoutMs: 120_000,
       slideClassificationMaxImageBytes: 5 * 1024 * 1024,
@@ -51,20 +49,15 @@ describe('server configuration', () => {
     expect(loadServerConfig({})).toMatchObject({
       host: '0.0.0.0',
       port: 43127,
-      previewProvider: 'headless',
-      previewRenderUrl: 'http://localhost:5173/_internal/template-preview',
+      quarryPreviewRenderUrl: 'http://localhost:1420/_internal/template-preview',
       requestTimeoutMs: 90_000,
     })
     expect(() => loadServerConfig({ HOST: 'localhost' })).toThrow('HOST must be an IP address.')
   })
 
-  it('rejects unsafe preview render URLs and unsupported providers', () => {
-    expect(() => loadServerConfig({ TEMPLATE_PREVIEW_RENDER_URL: 'file:///tmp/preview.html' }))
-      .toThrow('TEMPLATE_PREVIEW_RENDER_URL must be a valid HTTP or HTTPS URL.')
-    expect(() => loadServerConfig({ TEMPLATE_PREVIEW_RENDER_URL: 'https://user:secret@example.test' }))
-      .toThrow('TEMPLATE_PREVIEW_RENDER_URL must be a valid HTTP or HTTPS URL.')
-    expect(() => loadServerConfig({ TEMPLATE_PREVIEW_PROVIDER: 'browser' }))
-      .toThrow('TEMPLATE_PREVIEW_PROVIDER must be headless or disabled.')
+  it('rejects unsafe Quarry preview render URLs', () => {
+    expect(() => loadServerConfig({ QUARRY_TEMPLATE_PREVIEW_RENDER_URL: 'file:///tmp/preview.html' }))
+      .toThrow('QUARRY_TEMPLATE_PREVIEW_RENDER_URL must be a valid HTTP or HTTPS URL.')
     expect(() => loadServerConfig({ TEMPLATE_PREVIEW_RENDER_SIZE: '5000' }))
       .toThrow('TEMPLATE_PREVIEW_RENDER_SIZE must be between 320 and 4096 pixels.')
   })

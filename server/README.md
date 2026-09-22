@@ -29,11 +29,10 @@ Configuration is read once at startup:
 - `HOST` defaults to `0.0.0.0` and must be an IP address.
 - `MAX_PPTX_UPLOAD_BYTES` defaults to `26214400` (25 MiB).
 - `MAX_EXPORT_JSON_BYTES` defaults to `52428800` (50 MiB).
-- `TEMPLATE_PREVIEW_PROVIDER` defaults to `headless`. It accepts `headless` or `disabled`.
 - `TEMPLATE_PREVIEW_RENDER_SIZE` defaults to `1600` pixels.
-- `TEMPLATE_PREVIEW_RENDER_URL` defaults to
-  `http://localhost:5173/_internal/template-preview`. It must point to the Vite app (or the deployed
-  web app) while imports are running.
+- `QUARRY_TEMPLATE_PREVIEW_RENDER_URL` defaults to
+  `http://localhost:1420/_internal/template-preview`. Every import uses Quarry's equivalent
+  internal preview route through headless Chromium.
 - `TEMPLATE_PREVIEW_TIMEOUT_MS` defaults to `15000`.
 - `MAX_TEMPLATE_PREVIEW_BYTES` defaults to `10485760` (10 MiB).
 - `REQUEST_TIMEOUT_MS` defaults to `90000` so a synchronous v2 import can finish preview,

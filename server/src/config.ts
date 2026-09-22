@@ -10,9 +10,8 @@ export type ServerConfig = {
   maxPreviewBytes: number
   maxUploadBytes: number
   port: number
-  previewProvider: 'disabled' | 'headless'
+  quarryPreviewRenderUrl: string
   previewRenderSize: number
-  previewRenderUrl: string
   previewTimeoutMs: number
   requestTimeoutMs: number
   slideClassificationMaxImageBytes: number
@@ -29,7 +28,7 @@ const DEFAULT_PORT = 43127
 const DEFAULT_REQUEST_TIMEOUT_MS = 90_000
 const DEFAULT_PREVIEW_BYTES = 10 * 1024 * 1024
 const DEFAULT_PREVIEW_RENDER_SIZE = 1600
-const DEFAULT_PREVIEW_RENDER_URL = 'http://localhost:5173/_internal/template-preview'
+const DEFAULT_QUARRY_PREVIEW_RENDER_URL = 'http://localhost:1420/_internal/template-preview'
 const DEFAULT_PREVIEW_TIMEOUT_MS = 15_000
 const DEFAULT_CLASSIFICATION_TIMEOUT_MS = 45_000
 const DEFAULT_EMBEDDING_TIMEOUT_MS = 20_000
@@ -75,9 +74,12 @@ export function loadServerConfig(environment: NodeJS.ProcessEnv = process.env): 
       'MAX_PPTX_UPLOAD_BYTES',
     ),
     port: parsePort(environment.PORT),
-    previewProvider: parsePreviewProvider(environment.TEMPLATE_PREVIEW_PROVIDER),
+    quarryPreviewRenderUrl: parsePreviewRenderUrl(
+      environment.QUARRY_TEMPLATE_PREVIEW_RENDER_URL,
+      DEFAULT_QUARRY_PREVIEW_RENDER_URL,
+      'QUARRY_TEMPLATE_PREVIEW_RENDER_URL',
+    ),
     previewRenderSize: parsePreviewRenderSize(environment.TEMPLATE_PREVIEW_RENDER_SIZE),
-    previewRenderUrl: parsePreviewRenderUrl(environment.TEMPLATE_PREVIEW_RENDER_URL),
     previewTimeoutMs: parsePositiveInteger(
       environment.TEMPLATE_PREVIEW_TIMEOUT_MS,
       DEFAULT_PREVIEW_TIMEOUT_MS,
@@ -130,21 +132,17 @@ function nonBlank(value: string | undefined) {
   return normalized ? normalized : null
 }
 
-function parsePreviewProvider(value: string | undefined): 'disabled' | 'headless' {
-  const provider = value ?? 'headless'
-  if (provider !== 'disabled' && provider !== 'headless') {
-    throw new Error('TEMPLATE_PREVIEW_PROVIDER must be headless or disabled.')
-  }
-  return provider
-}
-
-function parsePreviewRenderUrl(value: string | undefined) {
-  const rawUrl = value ?? DEFAULT_PREVIEW_RENDER_URL
+function parsePreviewRenderUrl(
+  value: string | undefined,
+  fallback: string,
+  name: string,
+) {
+  const rawUrl = value ?? fallback
   let url: URL
   try {
     url = new URL(rawUrl)
   } catch {
-    throw new Error('TEMPLATE_PREVIEW_RENDER_URL must be a valid HTTP or HTTPS URL.')
+    throw new Error(`${name} must be a valid HTTP or HTTPS URL.`)
   }
   if (
     (url.protocol !== 'http:' && url.protocol !== 'https:')
@@ -152,7 +150,7 @@ function parsePreviewRenderUrl(value: string | undefined) {
     || url.password
     || url.hash
   ) {
-    throw new Error('TEMPLATE_PREVIEW_RENDER_URL must be a valid HTTP or HTTPS URL.')
+    throw new Error(`${name} must be a valid HTTP or HTTPS URL.`)
   }
   return url.toString()
 }

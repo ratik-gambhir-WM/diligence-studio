@@ -20,7 +20,7 @@ export type TemplatePreviewRequest = {
   templateJson: PowerPointCanvasJson
 }
 
-type HeadlessPreviewOptions = {
+export type HeadlessPreviewOptions = {
   maxBytes: number
   maxDimension?: number
   renderSize: number
@@ -74,6 +74,15 @@ export class HeadlessTemplatePreviewGenerator implements TemplatePreviewGenerato
     }
   }
 }
+
+/**
+ * Renders previews through Quarry's equivalent read-only SVG preview route.
+ *
+ * The implementation intentionally shares the headless runner and PNG validation
+ * with the Diligence Studio renderer so both providers have identical output,
+ * cancellation, resource-bounding, and failure behavior.
+ */
+export class QuarryTemplatePreviewGenerator extends HeadlessTemplatePreviewGenerator {}
 
 export function readPngDimensions(bytes: Buffer) {
   const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])

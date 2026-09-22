@@ -15,10 +15,7 @@ import { SlideClassificationService } from './services/SlideClassificationServic
 // The background SlideClassificationWorker is intentionally disabled. Import v2 owns the
 // classification and embedding pipeline synchronously so it cannot return pending retrieval data.
 import { LibraryPowerPointConverter } from './services/PowerPointConverter'
-import {
-  DisabledTemplatePreviewGenerator,
-  HeadlessTemplatePreviewGenerator,
-} from './services/TemplatePreview'
+import { QuarryTemplatePreviewGenerator } from './services/TemplatePreview'
 
 try {
   process.loadEnvFile(new URL('../.env', import.meta.url))
@@ -37,12 +34,10 @@ const previewOptions = {
   renderSize: config.previewRenderSize,
   timeoutMs: config.previewTimeoutMs,
 }
-const previewGenerator = config.previewProvider === 'headless'
-  ? new HeadlessTemplatePreviewGenerator({
-      ...previewOptions,
-      renderUrl: config.previewRenderUrl,
-    })
-  : new DisabledTemplatePreviewGenerator()
+const previewGenerator = new QuarryTemplatePreviewGenerator({
+  ...previewOptions,
+  renderUrl: config.quarryPreviewRenderUrl,
+})
 let classificationService: SlideClassificationService | undefined
 
 if (
@@ -95,7 +90,7 @@ const server = createServer(createApp({
 
 server.listen(config.port, config.host, () => {
   console.log(
-    `PowerPoint API listening at ${config.host}:${config.port}; template previews: ${config.previewProvider}; slide classification: ${config.slideClassificationProvider}${config.openaiSlideClassificationModel ? ` (${config.openaiSlideClassificationModel}, synchronous)` : ''}.`,
+    `PowerPoint API listening at ${config.host}:${config.port}; template previews: quarry; slide classification: ${config.slideClassificationProvider}${config.openaiSlideClassificationModel ? ` (${config.openaiSlideClassificationModel}, synchronous)` : ''}.`,
   )
 })
 
