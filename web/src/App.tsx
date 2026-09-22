@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { ChangeEvent } from 'react'
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
@@ -17,6 +17,7 @@ import { PromptPage } from './pages/PromptPage'
 import { CommentaryPicker } from './pages/CommentaryPicker'
 import { SlidePickerPage } from './pages/SlidePickerPage'
 import { TemplateCanvasPage } from './pages/TemplateCanvasPage'
+import { SnailLoader } from './components/SnailLoader'
 import type { ModelSelectorOutput } from './types/ModelSelectorOutput'
 import { formatFileSize } from './utils/files'
 
@@ -26,14 +27,19 @@ const DIAGRAM_PICKER_ROUTE = '/diagram-picker'
 const DIAGRAM_CANVAS_ROUTE = '/diagram-template'
 const JSON_INPUT_ROUTE = '/json-input'
 const LOGIN_ROUTE = '/login'
-const EMAIL_SESSION_STORAGE_KEY = 'diligence-studio-email'
 type CanvasTemplateSource = 'commentary' | 'diagram'
+type AuthSession = {
+  email: string
+  id: string
+  name: string
+}
 
 export default function App() {
   const location = useLocation()
   const navigate = useNavigate()
   const shouldReduceMotion = useReducedMotion()
-  const [session, setSession] = useState(() => getStoredSession())
+  const [session, setSession] = useState<AuthSession | null>(null)
+  const [isSessionLoading, setIsSessionLoading] = useState(true)
   const [canvasTemplate, setCanvasTemplate] = useState<CanvasTemplate | null>(null)
   const [canvasTemplateSource, setCanvasTemplateSource] = useState<CanvasTemplateSource>('diagram')
   const [templateStatusMessage, setTemplateStatusMessage] = useState('')
@@ -54,11 +60,33 @@ export default function App() {
     uploadOnlyAttachments,
   } = useDiagramSession()
 
-  function handleLogin(credentials: { email: string }) {
-    storeSession(credentials)
-    setSession(credentials)
-    navigate(EXPORTER_ROUTE)
-  }
+  useEffect(() => {
+    let isActive = true
+
+    fetch('/api/auth/me', { credentials: 'include' })
+      .then(async (response) => {
+        if (!response.ok) {
+          return null
+        }
+
+        return (await response.json()) as { authenticated: boolean; user?: AuthSession }
+      })
+      .then((result) => {
+        if (isActive && result?.authenticated && result.user) {
+          setSession(result.user)
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (isActive) {
+          setIsSessionLoading(false)
+        }
+      })
+
+    return () => {
+      isActive = false
+    }
+  }, [])
 
   function handleUploadOnlyFileChange(event: ChangeEvent<HTMLInputElement>) {
     const uploadedFiles = handleFiles(event, 'upload-only')
@@ -220,6 +248,14 @@ export default function App() {
     }
   }
 
+  function handleSignInWithMicrosoft() {
+    window.location.assign('/api/auth/login')
+  }
+
+  if (isSessionLoading) {
+    return <SnailLoader />
+  }
+
   return (
     <div className="min-h-screen overflow-x-hidden bg-[#070a1b]">
       <AnimatePresence mode="popLayout" initial={false}>
@@ -239,8 +275,8 @@ export default function App() {
                   <Navigate replace to={EXPORTER_ROUTE} />
                 ) : (
                   <LoginPage
-                    initialEmailLocalPart={getEmailLocalPart(getStoredEmail())}
-                    onSubmit={handleLogin}
+                    authError={new URLSearchParams(location.search).get('authError') ?? ''}
+                    onSignInWithMicrosoft={handleSignInWithMicrosoft}
                   />
                 )
               }
@@ -374,34 +410,4 @@ function toCanvasTemplate(
     name: template.title,
     relatedAlt: `${template.title} template preview`,
   }
-}
-
-function getStoredSession() {
-  if (typeof window === 'undefined') {
-    return null
-  }
-
-  const email = window.sessionStorage.getItem(EMAIL_SESSION_STORAGE_KEY)
-
-  if (!email) {
-    return null
-  }
-
-  return { email }
-}
-
-function storeSession(credentials: { email: string }) {
-  window.sessionStorage.setItem(EMAIL_SESSION_STORAGE_KEY, credentials.email)
-}
-
-function getStoredEmail() {
-  if (typeof window === 'undefined') {
-    return ''
-  }
-
-  return window.sessionStorage.getItem(EMAIL_SESSION_STORAGE_KEY) ?? ''
-}
-
-function getEmailLocalPart(email: string) {
-  return email.replace(/@westmonroe\.com$/i, '')
 }

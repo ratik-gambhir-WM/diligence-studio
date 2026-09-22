@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "npm run dev --workspace @diligence-studio/web",
     "web:dev": "npm run dev --workspace @diligence-studio/web",
+    "api": "node --env-file=.env --import tsx server/src/server.ts",
     "server:dev": "npm run dev --workspace @diligence-studio/server",
     "server:start": "npm run start --workspace @diligence-studio/server",
     "typecheck": "npm run typecheck --workspaces --if-present",

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import express from 'express'
 
 import { createApiLoggingMiddleware, recordApiError, type ApiLogger } from './apiLogging'
+import { createMicrosoftAuthRouter } from './auth/microsoftAuth'
 import { API_V1_PATH } from './apiPaths'
 import { ApiError, errorHandler, notFoundHandler } from './errors'
 import { createExportRouter } from './routes/exportRoutes'
@@ -54,6 +55,7 @@ export function createApp(dependencies: AppDependencies) {
     })
     next()
   })
+  app.use('/api/auth', createMicrosoftAuthRouter())
   apiV1.use('/export', createExportRouter(
     dependencies.exportService,
     dependencies.maxExportJsonBytes,

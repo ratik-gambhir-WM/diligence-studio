@@ -278,6 +278,40 @@
     transition: border-color 150ms ease, color 150ms ease;
   }
 
+  .app-nav-logout-button {
+    flex-shrink: 0;
+    margin-left: 1.25rem;
+    padding: 0 0 0.25rem;
+    border: 0;
+    border-bottom: 1px solid transparent;
+    background: transparent;
+    color: var(--theme-page-text);
+    cursor: pointer;
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    transition: border-color 150ms ease, color 150ms ease;
+  }
+
+  .app-nav-logout-button:hover,
+  .app-nav-logout-button:focus-visible {
+    border-bottom-color: var(--theme-accent);
+    color: var(--theme-accent);
+  }
+
+  .app-nav-logout-button:disabled {
+    cursor: wait;
+    opacity: 0.6;
+  }
+
+  .app-nav-logout-error {
+    margin-left: 1rem;
+    color: #ffb5b5;
+    font-size: 0.65rem;
+    line-height: 1.2;
+  }
+
   .app-nav-menu-button:hover {
     border-color: var(--theme-accent);
     color: var(--theme-accent);
