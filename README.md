@@ -25,6 +25,9 @@ along with the standard OpenID scopes. Copy `.env.example` to `.env` and set the
 before starting the API service. Sessions are held in memory by the API service, so restarting it
 signs users out.
 
+See [docs/microsoft-sign-in-flow-design.md](docs/microsoft-sign-in-flow-design.md) for the complete request sequence, Entra registration steps,
+configuration reference, troubleshooting, and security review notes.
+
 ## Run locally
 
 From the repository root:
