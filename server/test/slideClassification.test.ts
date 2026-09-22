@@ -34,7 +34,7 @@ describe('slide classification contracts', () => {
     })).toThrow()
   })
 
-  it('builds a bounded digest that preserves facts but excludes image bytes', () => {
+  it('builds a bounded digest with stored element IDs for content slots but excludes image bytes', () => {
     const input = buildSlideClassificationInput({
       kind: 'diagram',
       limits: { maxDigestBytes: 4_000, maxPreviewBytes: 10 },
@@ -43,6 +43,9 @@ describe('slide classification contracts', () => {
     })
     expect(input.digest).toContain('Customer data flow')
     expect(input.digest).toContain('connected-lines=1')
+    expect(input.digest).toContain('element 1: id="text-1"')
+    expect(input.digest).toContain('element 2: id="line-1"')
+    expect(input.digest).toContain('element 3: id="image-1"')
     expect(input.digest).toContain('alt=Sensitive diagram')
     expect(input.digest).not.toContain('DO_NOT_INCLUDE')
     expect(input.preview).toBeUndefined()

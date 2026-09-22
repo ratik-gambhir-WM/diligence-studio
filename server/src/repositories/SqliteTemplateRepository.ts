@@ -596,6 +596,15 @@ export class SqliteTemplateRepository implements TemplateRepository {
     }
   }
 
+  hasTemplate(templateId: string, appId: string = DEFAULT_APP_ID) {
+    const row = this.#database.prepare(`
+      SELECT 1
+      FROM app_templates
+      WHERE app_id = ? AND template_id = ?
+    `).get(appId, templateId) as { 1: number } | undefined
+    return row !== undefined
+  }
+
   list(kind?: TemplateKind, appId: string = DEFAULT_APP_ID): StoredTemplateSummary[] {
     const rows = this.#database
       .prepare(`

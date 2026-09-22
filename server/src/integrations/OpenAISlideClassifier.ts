@@ -22,8 +22,8 @@ Use these controlled domain IDs: ${SLIDE_DOMAIN_TAXONOMY.join(', ')}.
 Put concepts that do not fit the controlled domains or their topic lists in other_topics.
 Use concise kebab-case topic IDs, including useful concepts such as security-testing or extensibility.
 Use these communication intents: ${COMMUNICATION_INTENT_TAXONOMY.join(', ')}.
-Classify every reusable content region as a content_slot. Copy element_id exactly from the digest;
-never invent an element ID. A slot role describes content such as headline, finding, evidence,
+Classify every reusable content region as a content_slot. Copy element_id exactly from the digest's
+JSON-quoted id value, without the quotation marks; never invent an element ID. A slot role describes content such as headline, finding, evidence,
 implication, recommendation, metric, diagram-label, or supporting-text.
 Use structural_features for reusable template anatomy, not company-specific content.
 Use these layout_type values: ${SLIDE_LAYOUT_TAXONOMY.join(', ')}.

@@ -7,6 +7,7 @@ import type { TemplateKind } from '../repositories/TemplateRepository'
 import {
   TEMPLATE_PREVIEW_PAGE_SIZE,
   type ImportService,
+  type TemplateV2ReadOptions,
 } from '../services/ImportTemplateService'
 
 export function createImportHandlers(service: ImportService) {
@@ -83,6 +84,19 @@ export function createImportHandlers(service: ImportService) {
     response.json(template.templateJson)
   }
 
+  const findV2: RequestHandler<{ templateId: string }> = (request, response) => {
+    const options = parseTemplateV2ReadOptions(request.query)
+    const template = service.findV2(
+      request.params.templateId,
+      options,
+      parseAppId(request),
+    )
+    if (!template) {
+      throw new ApiError(404, 'template_not_found', 'The requested template does not exist.')
+    }
+    response.set('Cache-Control', 'private, no-store').json(template)
+  }
+
   const findAsset: RequestHandler<{ assetId: string; templateId: string }> = (request, response) => {
     const asset = service.findAsset(
       request.params.templateId,
@@ -141,7 +155,18 @@ export function createImportHandlers(service: ImportService) {
     response.sendStatus(204)
   }
 
-  return { batchCreate, create, createV2, find, findAsset, findPreview, list, listPreviews, remove }
+  return {
+    batchCreate,
+    create,
+    createV2,
+    find,
+    findAsset,
+    findPreview,
+    findV2,
+    list,
+    listPreviews,
+    remove,
+  }
 }
 
 function validatePowerPointRequest(request: Request) {
@@ -209,4 +234,23 @@ function parsePreviewPage(value: unknown) {
     throw new ApiError(400, 'invalid_preview_page', 'Preview page must be a positive integer.')
   }
   return page
+}
+
+function parseTemplateV2ReadOptions(query: Record<string, unknown>): TemplateV2ReadOptions {
+  for (const key of Object.keys(query)) {
+    if (key !== 'appId' && key !== 'embeddings' && key !== 'metadata') {
+      throw new ApiError(400, 'invalid_template_v2_query', 'The template query is invalid.')
+    }
+  }
+
+  return {
+    includeEmbeddings: parseBooleanQuery(query.embeddings),
+    includeMetadata: parseBooleanQuery(query.metadata),
+  }
+}
+
+function parseBooleanQuery(value: unknown) {
+  if (value === undefined || value === 'false') return false
+  if (value === 'true') return true
+  throw new ApiError(400, 'invalid_template_v2_query', 'The template query is invalid.')
 }

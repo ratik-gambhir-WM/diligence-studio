@@ -98,12 +98,28 @@ endpoint returns `503` before conversion when the provider is disabled. If provi
 fails after the template is saved, the request fails and the stored classification record is marked
 failed without publishing partial metadata or a vector. Existing v1 import, batch import, built-in
 seeding, and existing templates do not create classification work. There are no public
-classification, status, retry, backfill, or retrieval routes. Retrieval is available only through
-the app-bound in-process `SlideRetrievalService`/Agent adapter; semantic and hybrid text search are
-the only query modes that may call the embedding provider. The adapter also exposes
+classification, status, retry, or backfill routes. Retrieval is available through the narrow
+template inspection endpoint below and the app-bound in-process `SlideRetrievalService`/Agent
+adapter; semantic and hybrid text search are the only query modes that may call the embedding
+provider. The adapter also exposes
 `find_slides_for_finding({ markdown, limit })`, which independently ranks subject relevance and
 template capability, applies exact domain/topic/intent/content-slot boosts, and returns match
 reasons without exposing vectors or cross-app templates.
+
+### Inspect one v2 template
+
+`GET /api/v2/templates/:templateId` is app-scoped using `X-App-Id` (or `appId`). By default it
+returns only the template ID, without loading classification data:
+
+```json
+{ "templateId": "template-123" }
+```
+
+Set either optional flag to `true` to request it: `metadata=true` returns normalized retrieval
+metadata; `embeddings=true` returns the raw subject and template-capability vectors plus their
+status, model, and dimensions. Both flags accept only `true` or `false`, default to `false`, and
+may be combined. A template with no classification record returns `null` metadata and an embeddings
+object with `null` vectors and `not_ready` status. Responses are `Cache-Control: private, no-store`.
 
 Import a deck by sending its binary `.pptx` body:
 

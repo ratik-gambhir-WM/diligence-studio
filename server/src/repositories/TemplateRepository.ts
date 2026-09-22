@@ -176,6 +176,7 @@ export interface TemplateRepository {
   findByIdWithAssets(templateId: string, appId?: string): StoredTemplateWithAssets | undefined
   findPreview(templateId: string, appId?: string): StoredTemplatePreview | undefined
   findSlideClassification(templateId: string): StoredSlideClassification | undefined
+  hasTemplate(templateId: string, appId?: string): boolean
   insert(
     template: StoredTemplate,
     assets: readonly TemplateAsset[],

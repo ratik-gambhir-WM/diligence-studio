@@ -7,7 +7,7 @@ import { API_V1_PATH, API_V2_PATH } from './apiPaths'
 import { ApiError, errorHandler, notFoundHandler } from './errors'
 import { createExportRouter } from './routes/exportRoutes'
 import { createBatchImportRouter, createImportRouter, createImportV2Router } from './routes/importRoutes'
-import { createTemplateRouter } from './routes/templateRoutes'
+import { createTemplateRouter, createTemplateV2Router } from './routes/templateRoutes'
 import type { ExportPowerPointUseCase } from './services/ExportPowerPointService'
 import type { ImportService } from './services/ImportTemplateService'
 
@@ -71,6 +71,7 @@ export function createApp(dependencies: AppDependencies) {
   apiV1.use('/templates', createTemplateRouter(dependencies.importService))
   app.use(API_V1_PATH, apiV1)
   apiV2.use('/import', createImportV2Router(dependencies.importService, dependencies.maxUploadBytes))
+  apiV2.use('/templates', createTemplateV2Router(dependencies.importService))
   app.use(API_V2_PATH, apiV2)
   app.use(notFoundHandler)
   app.use(errorHandler)

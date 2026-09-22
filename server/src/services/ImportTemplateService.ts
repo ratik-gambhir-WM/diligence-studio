@@ -83,6 +83,23 @@ export type ImportV2Response = {
   warnings: string[]
 }
 
+export type TemplateV2ReadOptions = {
+  includeEmbeddings: boolean
+  includeMetadata: boolean
+}
+
+export type TemplateV2ReadResponse = {
+  embeddings?: {
+    capabilityVector: readonly number[] | null
+    dimensions: number | null
+    model: string | null
+    status: 'not_ready' | 'pending' | 'processing' | 'ready' | 'failed'
+    subjectVector: readonly number[] | null
+  }
+  metadata?: SlideRetrievalMetadata | null
+  templateId: string
+}
+
 export const TEMPLATE_PREVIEW_PAGE_SIZE = 10
 
 export class ImportService {
@@ -342,6 +359,41 @@ export class ImportService {
       templateId,
       templateJson: hydrateCanvasTemplateAssetSources(templateJson, assets),
     }
+  }
+
+  /**
+   * Read only the requested retrieval fields. The template JSON is deliberately excluded from
+   * this v2 inspection response so callers can explore metadata and raw vectors independently.
+   */
+  findV2(
+    templateId: string,
+    options: TemplateV2ReadOptions,
+    appId: string = DEFAULT_APP_ID,
+  ): TemplateV2ReadResponse | undefined {
+    this.templates.ensureApp(appId)
+    if (!this.templates.hasTemplate(templateId, appId)) {
+      return undefined
+    }
+
+    if (!options.includeEmbeddings && !options.includeMetadata) {
+      return { templateId }
+    }
+
+    const classification = this.templates.findSlideClassification(templateId)
+    const result: TemplateV2ReadResponse = { templateId }
+    if (options.includeMetadata) {
+      result.metadata = classification?.metadata ?? null
+    }
+    if (options.includeEmbeddings) {
+      result.embeddings = {
+        capabilityVector: classification?.capabilityVector ?? null,
+        dimensions: classification?.embeddingDimensions ?? null,
+        model: classification?.embeddingModel ?? null,
+        status: classification?.embeddingStatus ?? 'not_ready',
+        subjectVector: classification?.subjectVector ?? null,
+      }
+    }
+    return result
   }
 
   findAsset(templateId: string, assetId: string, appId: string = DEFAULT_APP_ID) {

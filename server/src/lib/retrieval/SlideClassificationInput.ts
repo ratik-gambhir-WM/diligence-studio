@@ -10,7 +10,7 @@ import {
   SLIDE_CLASSIFICATION_SCHEMA_VERSION,
 } from './SlideRetrievalMetadata'
 
-export const SLIDE_CLASSIFICATION_INPUT_BUILDER_VERSION = 1
+export const SLIDE_CLASSIFICATION_INPUT_BUILDER_VERSION = 2
 
 export type SlideClassificationInput = {
   digest: string
@@ -136,18 +136,19 @@ function describeElement(
   slideHeight: number,
   takeText: (text: string) => string,
 ) {
+  const identifier = `id=${JSON.stringify(element.id)}`
   if (element.type === 'line') {
-    return `element ${index}: line; route=${element.lineType}; arrows=${element.beginArrow ?? 'none'}->${element.endArrow ?? 'none'}; box=${normalizedLineBox(element, slideWidth, slideHeight)}`
+    return `element ${index}: ${identifier}; line; route=${element.lineType}; arrows=${element.beginArrow ?? 'none'}->${element.endArrow ?? 'none'}; box=${normalizedLineBox(element, slideWidth, slideHeight)}`
   }
   const box = normalizedBox(element.x, element.y, element.w, element.h, slideWidth, slideHeight)
   if (element.type === 'image') {
-    return `element ${index}: image; alt=${normalizeText(element.altText ?? '') || 'none'}; fit=${element.fit}; crop=${stableStringify(element.crop ?? {})}; box=${box}`
+    return `element ${index}: ${identifier}; image; alt=${normalizeText(element.altText ?? '') || 'none'}; fit=${element.fit}; crop=${stableStringify(element.crop ?? {})}; box=${box}`
   }
   const runs = element.runs?.map((run) => run.text).join('') ?? ''
   const visibleText = normalizeText(element.text ?? runs)
   const text = takeText(visibleText)
   const shape = element.type === 'shape' ? `; shape=${normalizeText(element.shape)}` : ''
-  return `element ${index}: ${element.type}${shape}; text=${text || 'none'}; box=${box}`
+  return `element ${index}: ${identifier}; ${element.type}${shape}; text=${text || 'none'}; box=${box}`
 }
 
 function normalizedLineBox(
