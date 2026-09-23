@@ -26,6 +26,7 @@ import { TemplateCanvasPage } from './pages/TemplateCanvasPage'
 import { SnailLoader } from './components/SnailLoader'
 import type { ModelSelectorOutput } from './types/ModelSelectorOutput'
 import { formatFileSize } from './utils/files'
+import { MICROSOFT_SUPPORT } from './lib/microsoftSupport'
 
 const EXPORTER_ROUTE = '/'
 const COMMENTARY_PICKER_ROUTE = '/commentary-picker'
@@ -74,6 +75,11 @@ export default function App() {
   } = useDiagramSession()
 
   useEffect(() => {
+    if (!MICROSOFT_SUPPORT) {
+      setIsSessionLoading(false)
+      return
+    }
+
     let isActive = true
 
     fetch('/api/auth/me', { credentials: 'include' })
@@ -118,6 +124,8 @@ export default function App() {
     files: SharePointFile[],
     sourceUrl: string,
   ) {
+    if (!MICROSOFT_SUPPORT) return
+
     if (files.length === 0) {
       setSharePointError('No supported files were found in that SharePoint resource.')
       return
@@ -149,6 +157,8 @@ export default function App() {
   }
 
   async function handleResolveSharePoint() {
+    if (!MICROSOFT_SUPPORT) return
+
     const url = sharePointUrl.trim()
     if (!url) {
       setSharePointError('Paste a SharePoint file or folder link first.')
@@ -178,7 +188,7 @@ export default function App() {
   }
 
   function handleUseSharePointFiles(files: SharePointFile[]) {
-    if (!sharePointResource) return
+    if (!MICROSOFT_SUPPORT || !sharePointResource) return
     void downloadAndAddSharePointFiles(files, sharePointResource.resourceUrl)
   }
 
@@ -354,7 +364,9 @@ export default function App() {
             <Route
               path={LOGIN_ROUTE}
               element={
-                session ? (
+                !MICROSOFT_SUPPORT ? (
+                  <Navigate replace to={EXPORTER_ROUTE} />
+                ) : session ? (
                   <Navigate replace to={EXPORTER_ROUTE} />
                 ) : (
                   <LoginPage
@@ -367,11 +379,12 @@ export default function App() {
             <Route
               path={EXPORTER_ROUTE}
               element={
-                session ? (
+                !MICROSOFT_SUPPORT || session ? (
                   <PromptPage
                     acceptAttr={ACCEPT_ATTR}
                     createMode={isCreateMode}
                     isUploadOnlySelecting={isModelSelecting}
+                    microsoftSupport={MICROSOFT_SUPPORT}
                     onOpenCommentaryPicker={() => navigate(COMMENTARY_PICKER_ROUTE)}
                     onCreateModeChange={setIsCreateMode}
                     onOpenDiagramPicker={() => navigate(DIAGRAM_PICKER_ROUTE)}
@@ -409,7 +422,7 @@ export default function App() {
             <Route
               path={DIAGRAM_PICKER_ROUTE}
               element={
-                session ? (
+                !MICROSOFT_SUPPORT || session ? (
                   <SlidePickerPage
                     acceptAttr={ACCEPT_ATTR}
                     attachmentCountLabel={attachmentCountLabel}
@@ -432,7 +445,7 @@ export default function App() {
             <Route
               path={COMMENTARY_PICKER_ROUTE}
               element={
-                session ? (
+                !MICROSOFT_SUPPORT || session ? (
                   <CommentaryPicker
                     error={templateError}
                     isSubmitting={isTemplateSubmitting}
@@ -448,7 +461,7 @@ export default function App() {
             <Route
               path={JSON_INPUT_ROUTE}
               element={
-                session ? (
+                !MICROSOFT_SUPPORT || session ? (
                   <JsonInputPage
                     onOpenCommentaryPicker={() => navigate(COMMENTARY_PICKER_ROUTE)}
                     onOpenDiagramPicker={() => navigate(DIAGRAM_PICKER_ROUTE)}
@@ -463,7 +476,7 @@ export default function App() {
             <Route
               path={DIAGRAM_CANVAS_ROUTE}
               element={
-                session ? (
+                !MICROSOFT_SUPPORT || session ? (
                   canvasTemplate ? <TemplateCanvasPage
                     template={canvasTemplate}
                     statusMessage={templateStatusMessage}

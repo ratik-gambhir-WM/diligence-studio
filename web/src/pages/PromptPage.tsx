@@ -24,6 +24,7 @@ type PromptPageProps = {
   acceptAttr: string
   createMode: boolean
   isUploadOnlySelecting: boolean
+  microsoftSupport: boolean
   onOpenCommentaryPicker: () => void
   onOpenDiagramPicker: () => void
   onOpenInputPage: () => void
@@ -51,6 +52,7 @@ export function PromptPage({
   acceptAttr,
   createMode,
   isUploadOnlySelecting,
+  microsoftSupport,
   onOpenCommentaryPicker,
   onOpenDiagramPicker,
   onOpenInputPage,
@@ -134,29 +136,31 @@ export function PromptPage({
             >
               {isUploadOnlySelecting ? 'Selecting...' : 'Upload file'}
             </FileUploadButton>
-            <div className="flex min-w-[18rem] flex-1 flex-wrap gap-2">
-              <label className="sr-only" htmlFor="sharepoint-resource-url">
-                SharePoint file or folder link
-              </label>
-              <input
-                id="sharepoint-resource-url"
-                type="url"
-                value={sharePointUrl}
-                onChange={(event) => onSharePointUrlChange(event.currentTarget.value)}
-                placeholder="Paste a SharePoint file or folder link"
-                disabled={isUploadOnlySelecting || sharePointIsResolving || sharePointIsDownloading}
-                className="min-w-0 flex-1 rounded-full border border-[#28304a] bg-[#080c1c] px-4 py-2.5 text-[0.84rem] text-[#eef3ff] outline-none placeholder:text-[#737b95] focus:border-[#f3c316]"
-              />
-              <Button
-                type="button"
-                onClick={onResolveSharePoint}
-                disabled={isUploadOnlySelecting || sharePointIsResolving || sharePointIsDownloading || !sharePointUrl.trim()}
-                variant="secondary"
-                className="px-4 py-2.5 text-[0.9rem]"
-              >
-                {sharePointIsResolving ? 'Loading...' : 'Load SharePoint'}
-              </Button>
-            </div>
+            {microsoftSupport && (
+              <div className="flex min-w-[18rem] flex-1 flex-wrap gap-2">
+                <label className="sr-only" htmlFor="sharepoint-resource-url">
+                  SharePoint file or folder link
+                </label>
+                <input
+                  id="sharepoint-resource-url"
+                  type="url"
+                  value={sharePointUrl}
+                  onChange={(event) => onSharePointUrlChange(event.currentTarget.value)}
+                  placeholder="Paste a SharePoint file or folder link"
+                  disabled={isUploadOnlySelecting || sharePointIsResolving || sharePointIsDownloading}
+                  className="min-w-0 flex-1 rounded-full border border-[#28304a] bg-[#080c1c] px-4 py-2.5 text-[0.84rem] text-[#eef3ff] outline-none placeholder:text-[#737b95] focus:border-[#f3c316]"
+                />
+                <Button
+                  type="button"
+                  onClick={onResolveSharePoint}
+                  disabled={isUploadOnlySelecting || sharePointIsResolving || sharePointIsDownloading || !sharePointUrl.trim()}
+                  variant="secondary"
+                  className="px-4 py-2.5 text-[0.9rem]"
+                >
+                  {sharePointIsResolving ? 'Loading...' : 'Load SharePoint'}
+                </Button>
+              </div>
+            )}
             <Button
               type="button"
               onClick={onUploadOnlySubmit}
@@ -174,7 +178,7 @@ export function PromptPage({
             </p>
           )}
 
-          {sharePointError && (
+          {microsoftSupport && sharePointError && (
             <p className="relative mt-3 text-center text-[0.92rem] leading-5 text-[#ffb5b5]" role="alert">
               {sharePointError}
             </p>
@@ -195,7 +199,7 @@ export function PromptPage({
         </StudioPanel>
       </div>
 
-      {sharePointResource?.kind === 'folder' && (
+      {microsoftSupport && sharePointResource?.kind === 'folder' && (
         <SharePointFilePicker
           error={sharePointError}
           isDownloading={sharePointIsDownloading}

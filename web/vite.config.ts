@@ -8,6 +8,7 @@ export default defineConfig(({ mode }) => {
   const resolvedApiKey =
     env.VITE_OPENAI_API_KEY || env.VITE_OPENAI_SECRET_KEY || env.OPENAI_API_KEY || env.OPENAI_SECRET_KEY || ''
   const resolvedModel = env.VITE_OPENAI_MODEL || env.OPENAI_MODEL || ''
+  const microsoftSupport = env.MICROSOFT_SUPPORT?.trim().toLowerCase() === 'true'
 
   return {
     plugins: [tailwindcss(), react()],
@@ -27,6 +28,7 @@ export default defineConfig(({ mode }) => {
       'import.meta.env.VITE_OPENAI_API_KEY': JSON.stringify(resolvedApiKey),
       'import.meta.env.VITE_OPENAI_SECRET_KEY': JSON.stringify(resolvedApiKey),
       'import.meta.env.VITE_OPENAI_MODEL': JSON.stringify(resolvedModel),
+      'import.meta.env.VITE_MICROSOFT_SUPPORT': JSON.stringify(String(microsoftSupport)),
     },
   }
 })

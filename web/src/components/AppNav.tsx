@@ -1,5 +1,6 @@
 import { useState } from 'react'
 
+import { MICROSOFT_SUPPORT } from '../lib/microsoftSupport'
 import { WestMonroeMark } from './WestMonroeMark'
 import { classNames } from './classNames'
 
@@ -119,14 +120,16 @@ export function AppNav({
           {logoutError}
         </span>
       )}
-      <button
-        type="button"
-        className="app-nav-logout-button"
-        onClick={handleLogout}
-        disabled={isLoggingOut}
-      >
-        {isLoggingOut ? 'Logging out...' : 'Log out'}
-      </button>
+      {MICROSOFT_SUPPORT && (
+        <button
+          type="button"
+          className="app-nav-logout-button"
+          onClick={handleLogout}
+          disabled={isLoggingOut}
+        >
+          {isLoggingOut ? 'Logging out...' : 'Log out'}
+        </button>
+      )}
       <button
         type="button"
         className="app-nav-menu-button"
