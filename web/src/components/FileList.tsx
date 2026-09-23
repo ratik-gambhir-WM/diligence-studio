@@ -1,8 +1,11 @@
 import { Button } from './Button'
 
 type FileListItem = {
+  id?: string
   name: string
+  path?: string
   size: number
+  source?: 'upload' | 'sharepoint'
 }
 
 type FileListProps = {
@@ -40,11 +43,16 @@ export function FileList({
         {files.map((file, index) => (
           <li
             className="file-list-item"
-            key={`${file.name}-${file.size}-${index}`}
+            key={file.id ?? `${file.name}-${file.size}-${index}`}
           >
             <span className="file-list-name">
-              {file.name}
-              {!showCountHeader && ` (${formatFileSize(file.size)})`}
+              <span>
+                {file.name}
+                {!showCountHeader && ` (${formatFileSize(file.size)})`}
+              </span>
+              {file.source === 'sharepoint' && (
+                <span className="file-list-source">SharePoint{file.path ? ` · ${file.path}` : ''}</span>
+              )}
             </span>
             {showCountHeader ? (
               <span className="file-list-actions">

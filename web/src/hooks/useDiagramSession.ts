@@ -41,8 +41,35 @@ export const ACCEPT_ATTR = [
 ].join(',')
 
 type AttachmentRecord = {
+  id: string
   file: File
   mode: AttachmentMode
+  source: 'upload' | 'sharepoint'
+  sharePointFileId?: string
+  sharePointPath?: string
+  sharePointSourceUrl?: string
+}
+
+export type SharePointAttachmentInput = {
+  file: File
+  fileId: string
+  path: string
+  sourceUrl: string
+}
+
+export type UploadOnlyAttachmentItem = {
+  id: string
+  name: string
+  path?: string
+  size: number
+  source: 'upload' | 'sharepoint'
+}
+
+let attachmentSequence = 0
+
+function createAttachmentId() {
+  attachmentSequence += 1
+  return `attachment-${attachmentSequence}`
 }
 
 function getAttachmentCountLabel(count: number) {
@@ -95,10 +122,24 @@ export function useDiagramSession() {
     const { invalidFileNames, validAttachments } = partitionAttachments(incomingFiles)
 
     if (validAttachments.length > 0) {
-      setAttachmentRecords((previousAttachments) => [
-        ...previousAttachments,
-        ...validAttachments.map((file) => ({ file, mode })),
-      ])
+      setAttachmentRecords((previousAttachments) => {
+        const hasSharePointAttachments = previousAttachments.some(
+          (attachment) => attachment.mode === 'upload-only' && attachment.source === 'sharepoint',
+        )
+        const retainedAttachments = mode === 'upload-only' && hasSharePointAttachments
+          ? previousAttachments.filter((attachment) => attachment.mode !== 'upload-only')
+          : previousAttachments
+
+        return [
+          ...retainedAttachments,
+          ...validAttachments.map((file) => ({
+            file,
+            id: createAttachmentId(),
+            mode,
+            source: 'upload' as const,
+          })),
+        ]
+      })
     }
 
     setError(formatUnsupportedFilesMessage(invalidFileNames))
@@ -114,28 +155,63 @@ export function useDiagramSession() {
     )
   }
 
-  function removeUploadOnlyAttachment(index: number) {
+  function addSharePointAttachments(
+    attachmentsToAdd: SharePointAttachmentInput[],
+  ) {
+    if (attachmentsToAdd.length === 0) return
+
     setAttachmentRecords((previousAttachments) => {
-      let uploadOnlyIndex = -1
+      const retainedAttachments = previousAttachments.filter(
+        (attachment) => attachment.mode !== 'upload-only',
+      )
+      const existingSharePointIds = new Set(
+        retainedAttachments
+          .map((attachment) => attachment.sharePointFileId)
+          .filter((fileId): fileId is string => fileId !== undefined),
+      )
 
-      return previousAttachments.filter((attachment) => {
-        if (attachment.mode !== 'upload-only') {
-          return true
-        }
-
-        uploadOnlyIndex += 1
-        return uploadOnlyIndex !== index
-      })
+      return [
+        ...retainedAttachments,
+        ...attachmentsToAdd
+          .filter((attachment) => !existingSharePointIds.has(attachment.fileId))
+          .map((attachment) => ({
+            file: attachment.file,
+            id: createAttachmentId(),
+            mode: 'upload-only' as const,
+            sharePointFileId: attachment.fileId,
+            sharePointPath: attachment.path,
+            sharePointSourceUrl: attachment.sourceUrl,
+            source: 'sharepoint' as const,
+          })),
+      ]
     })
   }
+
+  function removeUploadOnlyAttachment(id: string) {
+    setAttachmentRecords((previousAttachments) => {
+      return previousAttachments.filter((attachment) => attachment.id !== id)
+    })
+  }
+
+  const uploadOnlyAttachmentItems: UploadOnlyAttachmentItem[] = attachmentRecords
+    .filter((attachment) => attachment.mode === 'upload-only')
+    .map((attachment) => ({
+      id: attachment.id,
+      name: attachment.file.name,
+      path: attachment.sharePointPath,
+      size: attachment.file.size,
+      source: attachment.source,
+    }))
 
   return {
     attachmentCountLabel,
     attachments,
+    addSharePointAttachments,
     error,
     handleFiles,
     removeAttachment,
     removeUploadOnlyAttachment,
+    uploadOnlyAttachmentItems,
     uploadOnlyAttachments,
   }
 }

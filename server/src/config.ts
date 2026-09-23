@@ -15,6 +15,7 @@ export type ServerConfig = {
   previewRenderUrl: string
   previewTimeoutMs: number
   requestTimeoutMs: number
+  sharePointAllowedHosts: string[]
 }
 
 const DEFAULT_MAX_UPLOAD_BYTES = 25 * 1024 * 1024
@@ -59,7 +60,21 @@ export function loadServerConfig(environment: NodeJS.ProcessEnv = process.env): 
       'TEMPLATE_PREVIEW_TIMEOUT_MS',
     ),
     requestTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
+    sharePointAllowedHosts: parseAllowedHosts(environment.SHAREPOINT_ALLOWED_HOSTS),
   }
+}
+
+function parseAllowedHosts(value: string | undefined) {
+  const hosts = (value ?? 'relentlessblue.sharepoint.com')
+    .split(',')
+    .map((host) => host.trim().toLowerCase())
+    .filter(Boolean)
+
+  if (hosts.length === 0 || hosts.some((host) => !/^[a-z0-9.-]+$/u.test(host))) {
+    throw new Error('SHAREPOINT_ALLOWED_HOSTS must contain comma-separated hostnames.')
+  }
+
+  return [...new Set(hosts)]
 }
 
 function parsePreviewProvider(value: string | undefined): 'disabled' | 'headless' | 'quicklook' {

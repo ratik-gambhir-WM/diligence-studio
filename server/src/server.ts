@@ -8,6 +8,7 @@ import { SqliteTemplateRepository } from './repositories/SqliteTemplateRepositor
 import { ExportService } from './services/ExportPowerPointService'
 import { ImportService } from './services/ImportTemplateService'
 import { LibraryPowerPointConverter } from './services/PowerPointConverter'
+import { SharePointResourceService } from './services/SharePointResourceService'
 import {
   DisabledTemplatePreviewGenerator,
   HeadlessTemplatePreviewGenerator,
@@ -38,6 +39,9 @@ const importService = new ImportService(
   undefined,
   previewGenerator,
 )
+const sharePointService = new SharePointResourceService({
+  allowedHosts: config.sharePointAllowedHosts,
+})
 const server = createServer(createApp({
   exportService,
   importService,
@@ -45,6 +49,7 @@ const server = createServer(createApp({
   maxExportJsonBytes: config.maxExportJsonBytes,
   maxUploadBytes: config.maxUploadBytes,
   requestTimeoutMs: config.requestTimeoutMs,
+  sharePointService,
 }))
 
 server.listen(config.port, config.host, () => {

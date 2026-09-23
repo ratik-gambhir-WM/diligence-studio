@@ -32,6 +32,7 @@ describe('server configuration', () => {
       previewRenderUrl: 'https://preview.example.test/_internal/template-preview',
       previewTimeoutMs: 5000,
       requestTimeoutMs: 30_000,
+      sharePointAllowedHosts: ['relentlessblue.sharepoint.com'],
     })
   })
 
@@ -62,5 +63,12 @@ describe('server configuration', () => {
       .toThrow('TEMPLATE_PREVIEW_PROVIDER must be headless, quicklook, or disabled.')
     expect(() => loadServerConfig({ TEMPLATE_PREVIEW_RENDER_SIZE: '5000' }))
       .toThrow('TEMPLATE_PREVIEW_RENDER_SIZE must be between 320 and 4096 pixels.')
+  })
+
+  it('validates SharePoint host allowlists', () => {
+    expect(loadServerConfig({ SHAREPOINT_ALLOWED_HOSTS: ' Contoso.SharePoint.com,contoso.sharepoint.com ' }))
+      .toMatchObject({ sharePointAllowedHosts: ['contoso.sharepoint.com'] })
+    expect(() => loadServerConfig({ SHAREPOINT_ALLOWED_HOSTS: 'https://contoso.sharepoint.com' }))
+      .toThrow('SHAREPOINT_ALLOWED_HOSTS must contain comma-separated hostnames.')
   })
 })

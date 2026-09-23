@@ -8,9 +8,11 @@ import { API_V1_PATH } from './apiPaths'
 import { ApiError, errorHandler, notFoundHandler } from './errors'
 import { createExportRouter } from './routes/exportRoutes'
 import { createBatchImportRouter, createImportRouter } from './routes/importRoutes'
+import { createSharePointRouter } from './routes/sharePointRoutes'
 import { createTemplateRouter } from './routes/templateRoutes'
 import type { ExportPowerPointUseCase } from './services/ExportPowerPointService'
 import type { ImportService } from './services/ImportTemplateService'
+import type { SharePointResourceServiceLike } from './services/SharePointResourceService'
 
 export type AppDependencies = {
   exportService: ExportPowerPointUseCase
@@ -19,6 +21,7 @@ export type AppDependencies = {
   maxUploadBytes: number
   logger?: ApiLogger
   requestTimeoutMs?: number
+  sharePointService?: SharePointResourceServiceLike
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
@@ -56,6 +59,9 @@ export function createApp(dependencies: AppDependencies) {
     next()
   })
   app.use('/api/auth', createMicrosoftAuthRouter())
+  if (dependencies.sharePointService) {
+    app.use('/api/v1/sharepoint', createSharePointRouter(dependencies.sharePointService))
+  }
   apiV1.use('/export', createExportRouter(
     dependencies.exportService,
     dependencies.maxExportJsonBytes,

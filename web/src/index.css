@@ -454,6 +454,17 @@
     white-space: nowrap;
   }
 
+  .file-list-source {
+    display: block;
+    overflow: hidden;
+    color: var(--theme-muted);
+    font-size: 0.68rem;
+    font-weight: 400;
+    line-height: 1.1rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   .file-list-actions {
     display: flex;
     flex-shrink: 0;

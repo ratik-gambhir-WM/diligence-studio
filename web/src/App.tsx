@@ -10,6 +10,12 @@ import {
   selectArchitectureDiagramModel,
 } from './lib/modelSelector'
 import { generateSlidePromptOutput } from './lib/OpenAI'
+import {
+  downloadSharePointFile,
+  resolveSharePointResource,
+  type SharePointFile,
+  type SharePointResolvedResource,
+} from './lib/api/sharepointApi'
 import { ACCEPT_ATTR, useDiagramSession } from './hooks/useDiagramSession'
 import { JsonInputPage } from './pages/JsonInputPage'
 import { LoginPage } from './pages/LoginPage'
@@ -50,13 +56,20 @@ export default function App() {
   const [modelSelectorError, setModelSelectorError] = useState('')
   const [isModelSelecting, setIsModelSelecting] = useState(false)
   const [isTemplateJsonOpenOnLoad, setIsTemplateJsonOpenOnLoad] = useState(false)
+  const [sharePointUrl, setSharePointUrl] = useState('')
+  const [sharePointResource, setSharePointResource] = useState<SharePointResolvedResource | null>(null)
+  const [sharePointError, setSharePointError] = useState('')
+  const [isSharePointResolving, setIsSharePointResolving] = useState(false)
+  const [isSharePointDownloading, setIsSharePointDownloading] = useState(false)
   const {
+    addSharePointAttachments,
     attachmentCountLabel,
     attachments,
     error,
     handleFiles,
     removeAttachment,
     removeUploadOnlyAttachment,
+    uploadOnlyAttachmentItems,
     uploadOnlyAttachments,
   } = useDiagramSession()
 
@@ -97,11 +110,81 @@ export default function App() {
 
     setModelSelection(null)
     setModelSelectorError('')
+    setSharePointResource(null)
+    setSharePointError('')
+  }
+
+  async function downloadAndAddSharePointFiles(
+    files: SharePointFile[],
+    sourceUrl: string,
+  ) {
+    if (files.length === 0) {
+      setSharePointError('No supported files were found in that SharePoint resource.')
+      return
+    }
+
+    setSharePointError('')
+    setIsSharePointDownloading(true)
+
+    try {
+      const downloadedFiles = await mapWithConcurrency(files, 4, async (file) => ({
+        file: await downloadSharePointFile(file),
+        fileId: file.fileId,
+        path: file.path,
+        sourceUrl,
+      }))
+      addSharePointAttachments(downloadedFiles)
+      setSharePointResource(null)
+      setModelSelection(null)
+      setModelSelectorError('')
+    } catch (error) {
+      setSharePointError(
+        error instanceof Error
+          ? error.message
+          : 'SharePoint files could not be loaded.',
+      )
+    } finally {
+      setIsSharePointDownloading(false)
+    }
+  }
+
+  async function handleResolveSharePoint() {
+    const url = sharePointUrl.trim()
+    if (!url) {
+      setSharePointError('Paste a SharePoint file or folder link first.')
+      return
+    }
+
+    setSharePointError('')
+    setSharePointResource(null)
+    setIsSharePointResolving(true)
+
+    try {
+      const resource = await resolveSharePointResource(url)
+      if (resource.kind === 'file') {
+        await downloadAndAddSharePointFiles(resource.files, resource.resourceUrl)
+      } else {
+        setSharePointResource(resource)
+      }
+    } catch (error) {
+      setSharePointError(
+        error instanceof Error
+          ? error.message
+          : 'The SharePoint link could not be resolved.',
+      )
+    } finally {
+      setIsSharePointResolving(false)
+    }
+  }
+
+  function handleUseSharePointFiles(files: SharePointFile[]) {
+    if (!sharePointResource) return
+    void downloadAndAddSharePointFiles(files, sharePointResource.resourceUrl)
   }
 
   async function handleUploadOnlySubmit() {
     if (uploadOnlyAttachments.length === 0) {
-      setModelSelectorError('Upload at least one file before submitting.')
+      setModelSelectorError('Add at least one file before submitting.')
       return
     }
 
@@ -295,15 +378,28 @@ export default function App() {
                     onOpenInputPage={() => navigate(EXPORTER_ROUTE)}
                     onOpenJsonInput={() => navigate(JSON_INPUT_ROUTE)}
                     onRemoveUploadOnlyFile={removeUploadOnlyAttachment}
+                    onResolveSharePoint={() => { void handleResolveSharePoint() }}
+                    onSharePointUrlChange={(url) => {
+                      setSharePointUrl(url)
+                      setSharePointError('')
+                    }}
+                    onCloseSharePointPicker={() => {
+                      if (!isSharePointDownloading) {
+                        setSharePointResource(null)
+                      }
+                    }}
+                    onUseSharePointFiles={handleUseSharePointFiles}
                     onUploadOnlyFileChange={handleUploadOnlyFileChange}
                     onUploadOnlySubmit={handleUploadOnlySubmit}
                     selectedArchitectureDiagramId={modelSelection?.selectedDiagramId ?? ''}
-                    uploadOnlyFiles={uploadOnlyAttachments.map((file) => ({
-                      name: file.name,
-                      size: file.size,
-                    }))}
+                    uploadOnlyFiles={uploadOnlyAttachmentItems}
                     uploadOnlyFileCount={uploadOnlyAttachments.length}
                     uploadOnlyError={modelSelectorError || error}
+                    sharePointError={sharePointError}
+                    sharePointIsDownloading={isSharePointDownloading}
+                    sharePointIsResolving={isSharePointResolving}
+                    sharePointResource={sharePointResource}
+                    sharePointUrl={sharePointUrl}
                   />
                 ) : (
                   <Navigate replace to={LOGIN_ROUTE} />
@@ -410,4 +506,26 @@ function toCanvasTemplate(
     name: template.title,
     relatedAlt: `${template.title} template preview`,
   }
+}
+
+async function mapWithConcurrency<Input, Output>(
+  values: Input[],
+  concurrency: number,
+  mapper: (value: Input) => Promise<Output>,
+) {
+  const results = new Array<Output>(values.length)
+  let nextIndex = 0
+
+  async function worker() {
+    while (nextIndex < values.length) {
+      const index = nextIndex
+      nextIndex += 1
+      results[index] = await mapper(values[index])
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, values.length) }, () => worker()),
+  )
+  return results
 }
