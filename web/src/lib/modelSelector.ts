@@ -195,6 +195,7 @@ export async function selectArchitectureDiagramModel({
   const candidateImageAttachments = await buildCandidateImageAttachments(candidates)
   const response = await createOpenAIResponse({
     attachments: [...uploadedFiles, ...candidateImageAttachments],
+    operation: 'model-selection',
     prompt: buildSelectorPrompt(uploadedFiles, candidates),
     systemInstructions: modelSelectorInstructions,
     text: {

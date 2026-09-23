@@ -24,6 +24,10 @@ import { CommentaryPicker } from './pages/CommentaryPicker'
 import { SlidePickerPage } from './pages/SlidePickerPage'
 import { TemplateCanvasPage } from './pages/TemplateCanvasPage'
 import { SnailLoader } from './components/SnailLoader'
+import {
+  logAttachmentDebug,
+  summarizeAttachments,
+} from './lib/attachmentDiagnostics'
 import type { ModelSelectorOutput } from './types/ModelSelectorOutput'
 import { formatFileSize } from './utils/files'
 import { MICROSOFT_SUPPORT } from './lib/microsoftSupport'
@@ -110,6 +114,10 @@ export default function App() {
   function handleUploadOnlyFileChange(event: ChangeEvent<HTMLInputElement>) {
     const uploadedFiles = handleFiles(event, 'upload-only')
 
+    logAttachmentDebug('upload-only-selection-handled', {
+      accepted: summarizeAttachments(uploadedFiles),
+    })
+
     if (uploadedFiles.length === 0) {
       return
     }
@@ -193,7 +201,14 @@ export default function App() {
   }
 
   async function handleUploadOnlySubmit() {
-    if (uploadOnlyAttachments.length === 0) {
+    const submittedAttachments = [...uploadOnlyAttachments]
+
+    logAttachmentDebug('upload-only-submit-started', {
+      createMode: isCreateMode,
+      attachments: summarizeAttachments(submittedAttachments),
+    })
+
+    if (submittedAttachments.length === 0) {
       setModelSelectorError('Add at least one file before submitting.')
       return
     }
@@ -212,7 +227,13 @@ export default function App() {
         )
         const createdDiagramJson = await generateArchitectureDiagramFromExamples({
           candidates,
-          uploadedFiles: uploadOnlyAttachments,
+          uploadedFiles: submittedAttachments,
+        })
+
+        logAttachmentDebug('upload-only-create-completed', {
+          attachments: summarizeAttachments(submittedAttachments),
+          slideCount: createdDiagramJson.presentation.slides.length,
+          elementCounts: createdDiagramJson.presentation.slides.map((slide) => slide.elements.length),
         })
 
         setModelSelection(null)
@@ -237,7 +258,7 @@ export default function App() {
 
       const selection = await selectArchitectureDiagramModel({
         candidates: catalog.templates,
-        uploadedFiles: uploadOnlyAttachments,
+        uploadedFiles: submittedAttachments,
       })
       const selectedTemplate = getSelectedArchitectureTemplate(selection, catalog.templates)
 
@@ -247,13 +268,19 @@ export default function App() {
 
       const selectedTemplateJson = await getTemplate(selectedTemplate.templateId)
       const generatedSlideJson = await generateSlidePromptOutput({
-        attachments: uploadOnlyAttachments,
+        attachments: submittedAttachments,
         templateJson: selectedTemplateJson,
         prompt: [
           `Selected template: ${selectedTemplate.title}.`,
           'Use the attached technical context files to update the architecture diagram text.',
           'Keep the template layout and all non-text JSON values unchanged.',
         ].join(' '),
+      })
+
+      logAttachmentDebug('upload-only-submit-completed', {
+        attachments: summarizeAttachments(submittedAttachments),
+        slideCount: generatedSlideJson.presentation.slides.length,
+        elementCounts: generatedSlideJson.presentation.slides.map((slide) => slide.elements.length),
       })
 
       setModelSelection(selection)
@@ -281,6 +308,12 @@ export default function App() {
   }
 
   async function handleSubmitTemplate(template: PickerTemplateSummary, signal: AbortSignal) {
+    const submittedAttachments = [...attachments]
+
+    logAttachmentDebug('template-submit-started', {
+      attachments: summarizeAttachments(submittedAttachments),
+    })
+
     setTemplateError('')
     setIsTemplateJsonOpenOnLoad(false)
     setIsTemplateSubmitting(true)
@@ -288,13 +321,19 @@ export default function App() {
     try {
       const templateJson = await getTemplate(template.templateId, signal)
       const generatedSlideJson = await generateSlidePromptOutput({
-        attachments,
+        attachments: submittedAttachments,
         templateJson,
         prompt: [
           `Selected template: ${template.title}.`,
           'Use the attached technical context files to update the architecture diagram text.',
           'Keep the template layout and all non-text JSON values unchanged.',
         ].join(' '),
+      })
+
+      logAttachmentDebug('template-submit-completed', {
+        attachments: summarizeAttachments(submittedAttachments),
+        slideCount: generatedSlideJson.presentation.slides.length,
+        elementCounts: generatedSlideJson.presentation.slides.map((slide) => slide.elements.length),
       })
 
       setCanvasTemplate({

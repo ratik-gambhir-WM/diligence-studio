@@ -85,6 +85,7 @@ export async function generateArchitectureDiagramFromExamples({
   const exampleImageAttachments = await Promise.all(candidates.map(buildExampleImageAttachment))
   const response = await createOpenAIResponse({
     attachments: [...uploadedFiles, ...exampleImageAttachments],
+    operation: 'diagram-generation',
     prompt: buildGenerationPrompt(uploadedFiles, candidates),
     systemInstructions: slideDiagramGenerationInstructions,
     text: {

@@ -12,11 +12,16 @@ import slideTextOnlyInstructions from '../prompts/SlideTextOnlyPrompt.md?raw'
 import { SLIDE_PROMPT_OUTPUT_FORMAT } from '../types/SlidePromptOutput'
 import type { SlidePromptOutput } from '../types/SlidePromptOutput'
 import { getExtension } from '../utils/files'
+import {
+  logAttachmentDebug,
+  summarizeAttachments,
+} from './attachmentDiagnostics'
 import type { JsonValue } from './canvas-model/CanvasTypes'
 
 type CreateOpenAIResponseParams = {
   attachments?: File[]
   model?: string
+  operation?: 'model-selection' | 'diagram-generation' | 'template-text-update' | 'unspecified'
   prompt: string
   systemInstructions?: string
   text?: ResponseCreateParamsNonStreaming['text']
@@ -149,11 +154,17 @@ export async function buildOpenAIUserContent(
 export async function createOpenAIResponse({
   attachments = [],
   model = DEFAULT_MODEL,
+  operation = 'unspecified',
   prompt,
   systemInstructions,
   text,
 }: CreateOpenAIResponseParams) {
   const input: ResponseInput = []
+
+  logAttachmentDebug('openai-request-started', {
+    operation,
+    attachments: summarizeAttachments(attachments),
+  })
 
   if (systemInstructions?.trim()) {
     input.push({
@@ -162,16 +173,65 @@ export async function createOpenAIResponse({
     })
   }
 
-  input.push({
-    role: 'user',
-    content: await buildOpenAIUserContent(prompt, attachments),
+  let userContent: ResponseInputContent[]
+
+  try {
+    userContent = await buildOpenAIUserContent(prompt, attachments)
+  } catch (error) {
+    logAttachmentDebug('openai-attachment-build-failed', {
+      attachmentCount: attachments.length,
+      errorType: error instanceof Error ? error.name : 'unknown',
+    })
+    throw error
+  }
+
+  const attachmentContent = userContent.filter((content) => content.type !== 'input_text')
+  const serializedAttachmentPayloadChars = attachmentContent.reduce((total, content) => {
+    if (content.type === 'input_file') {
+      return total + (typeof content.file_data === 'string' ? content.file_data.length : 0)
+    }
+
+    if (content.type === 'input_image') {
+      return total + (typeof content.image_url === 'string' ? content.image_url.length : 0)
+    }
+
+    return total
+  }, 0)
+  const emptySerializedAttachmentCount = attachmentContent.filter((content) => {
+    if (content.type === 'input_file') {
+      return typeof content.file_data !== 'string' || content.file_data.length === 0
+    }
+
+    return content.type === 'input_image'
+      && (typeof content.image_url !== 'string' || content.image_url.length === 0)
+  }).length
+
+  logAttachmentDebug('openai-request-attachments-built', {
+    expectedAttachmentCount: attachments.length,
+    contentCount: userContent.length,
+    attachmentContentCount: attachmentContent.length,
+    contentTypes: userContent.map((content) => content.type),
+    serializedAttachmentPayloadChars,
+    emptySerializedAttachmentCount,
   })
 
-  return getClient().responses.create({
+  input.push({
+    role: 'user',
+    content: userContent,
+  })
+
+  const response = await getClient().responses.create({
     model,
     input,
     ...(text ? { text } : {}),
   })
+
+  logAttachmentDebug('openai-response-received', {
+    operation,
+    outputTextLength: response.output_text?.length ?? 0,
+  })
+
+  return response
 }
 
 function buildSlideTextOnlyPrompt(templateJson: JsonValue, prompt?: string) {
@@ -194,6 +254,7 @@ export async function generateSlidePromptOutput({
 }: GenerateSlidePromptOutputParams): Promise<SlidePromptOutput> {
   const response = await createOpenAIResponse({
     attachments,
+    operation: 'template-text-update',
     prompt: buildSlideTextOnlyPrompt(templateJson, prompt),
     systemInstructions: slideTextOnlyInstructions,
     text: {

@@ -1,6 +1,10 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { ChangeEvent } from 'react'
 
+import {
+  logAttachmentDebug,
+  summarizeAttachments,
+} from '../lib/attachmentDiagnostics'
 import { getExtension } from '../utils/files'
 
 export type AttachmentMode = 'template-context' | 'upload-only'
@@ -112,6 +116,21 @@ export function useDiagramSession() {
 
   const attachmentCountLabel = getAttachmentCountLabel(attachments.length)
 
+  useEffect(() => {
+    logAttachmentDebug('attachment-state', {
+      total: summarizeAttachments(attachments),
+      uploadOnly: summarizeAttachments(uploadOnlyAttachments),
+      modeCounts: {
+        templateContext: attachmentRecords.filter((attachment) => attachment.mode === 'template-context').length,
+        uploadOnly: attachmentRecords.filter((attachment) => attachment.mode === 'upload-only').length,
+      },
+      sourceCounts: {
+        upload: attachmentRecords.filter((attachment) => attachment.source === 'upload').length,
+        sharePoint: attachmentRecords.filter((attachment) => attachment.source === 'sharepoint').length,
+      },
+    })
+  }, [attachmentRecords])
+
   function handleFiles(event: ChangeEvent<HTMLInputElement>, mode: AttachmentMode = 'template-context') {
     const incomingFiles = Array.from(event.target.files ?? [])
 
@@ -120,6 +139,14 @@ export function useDiagramSession() {
     }
 
     const { invalidFileNames, validAttachments } = partitionAttachments(incomingFiles)
+
+    logAttachmentDebug('file-selection', {
+      mode,
+      selectedCount: incomingFiles.length,
+      acceptedCount: validAttachments.length,
+      rejectedCount: invalidFileNames.length,
+      accepted: summarizeAttachments(validAttachments),
+    })
 
     if (validAttachments.length > 0) {
       setAttachmentRecords((previousAttachments) => {
@@ -159,6 +186,11 @@ export function useDiagramSession() {
     attachmentsToAdd: SharePointAttachmentInput[],
   ) {
     if (attachmentsToAdd.length === 0) return
+
+    logAttachmentDebug('sharepoint-files-added', {
+      requestedCount: attachmentsToAdd.length,
+      files: summarizeAttachments(attachmentsToAdd.map((attachment) => attachment.file)),
+    })
 
     setAttachmentRecords((previousAttachments) => {
       const retainedAttachments = previousAttachments.filter(
