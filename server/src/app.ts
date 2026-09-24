@@ -1,9 +1,13 @@
 import { randomUUID } from 'node:crypto'
 
-import express from 'express'
+import express, { type RequestHandler } from 'express'
 
 import { createApiLoggingMiddleware, recordApiError, type ApiLogger } from './apiLogging'
-import { createMicrosoftAuthRouter } from './auth/microsoftAuth'
+import {
+  AuthError,
+  createMicrosoftAuthRouter,
+  getMicrosoftAccessToken,
+} from './auth/microsoftAuth'
 import { API_V1_PATH } from './apiPaths'
 import { ApiError, errorHandler, notFoundHandler } from './errors'
 import { createExportRouter } from './routes/exportRoutes'
@@ -20,6 +24,8 @@ export type AppDependencies = {
   maxExportJsonBytes: number
   maxUploadBytes: number
   logger?: ApiLogger
+  microsoftCookieSecure?: boolean
+  requireMicrosoftAuth?: boolean
   requestTimeoutMs?: number
   sharePointService?: SharePointResourceServiceLike
 }
@@ -58,9 +64,14 @@ export function createApp(dependencies: AppDependencies) {
     })
     next()
   })
-  app.use('/api/auth', createMicrosoftAuthRouter())
+  app.use('/api/auth', createMicrosoftAuthRouter({
+    cookieSecure: dependencies.microsoftCookieSecure,
+  }))
   if (dependencies.sharePointService) {
     app.use('/api/v1/sharepoint', createSharePointRouter(dependencies.sharePointService))
+  }
+  if (dependencies.requireMicrosoftAuth) {
+    apiV1.use(createMicrosoftAuthGuard())
   }
   apiV1.use('/export', createExportRouter(
     dependencies.exportService,
@@ -81,4 +92,19 @@ export function createApp(dependencies: AppDependencies) {
   app.use(errorHandler)
 
   return app
+}
+
+function createMicrosoftAuthGuard(): RequestHandler {
+  return async (request, _response, next) => {
+    try {
+      await getMicrosoftAccessToken(request)
+      next()
+    } catch (error) {
+      if (error instanceof AuthError) {
+        next(new ApiError(error.statusCode, 'authentication_required', error.message))
+        return
+      }
+      next(error)
+    }
+  }
 }

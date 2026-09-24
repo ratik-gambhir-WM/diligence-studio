@@ -9,7 +9,10 @@ import {
 
 const MAX_RESOLVE_BODY_BYTES = 16 * 1024
 
-export type MicrosoftAccessTokenResolver = (request: Request) => Promise<string>
+export type MicrosoftAccessTokenResolver = (
+  request: Request,
+  signal?: AbortSignal,
+) => Promise<string>
 
 export function createSharePointRouter(
   service: SharePointResourceServiceLike,
@@ -41,10 +44,14 @@ function createResolveHandler(
       throw new ApiError(415, 'unsupported_media_type', 'Content-Type must be application/json.')
     }
 
-    const url = parseResourceUrl(request.body)
-    const token = await requireAccessToken(request, resolveAccessToken)
     const result = await runSharePointOperation(
-      () => service.resolveResource(url, token),
+      request,
+      response,
+      async (signal) => {
+        const url = parseResourceUrl(request.body)
+        const token = await requireAccessToken(request, resolveAccessToken, signal)
+        return service.resolveResource(url, token, signal)
+      },
     )
 
     response
@@ -59,11 +66,15 @@ function createDownloadHandler(
   resolveAccessToken: MicrosoftAccessTokenResolver,
 ): RequestHandler {
   return async (request, response) => {
-    const driveId = parseIdentifier(request.params.driveId, 'driveId')
-    const fileId = parseIdentifier(request.params.fileId, 'fileId')
-    const token = await requireAccessToken(request, resolveAccessToken)
     const result = await runSharePointOperation(
-      () => service.downloadFile(driveId, fileId, token),
+      request,
+      response,
+      async (signal) => {
+        const driveId = parseIdentifier(request.params.driveId, 'driveId')
+        const fileId = parseIdentifier(request.params.fileId, 'fileId')
+        const token = await requireAccessToken(request, resolveAccessToken, signal)
+        return service.downloadFile(driveId, fileId, token, signal)
+      },
     )
 
     response
@@ -82,9 +93,10 @@ function createDownloadHandler(
 async function requireAccessToken(
   request: Request,
   resolveAccessToken: MicrosoftAccessTokenResolver,
+  signal: AbortSignal,
 ) {
   try {
-    return await resolveAccessToken(request)
+    return await resolveAccessToken(request, signal)
   } catch (error) {
     if (error instanceof AuthError) {
       throw new ApiError(error.statusCode, 'authentication_required', error.message)
@@ -93,14 +105,31 @@ async function requireAccessToken(
   }
 }
 
-async function runSharePointOperation<Result>(operation: () => Promise<Result>) {
+async function runSharePointOperation<Result>(
+  request: Request,
+  response: Response,
+  operation: (signal: AbortSignal) => Promise<Result>,
+) {
+  const abortController = new AbortController()
+  const abort = () => abortController.abort()
+  const abortOnResponseClose = () => {
+    if (!response.writableEnded) abort()
+  }
+  request.once('aborted', abort)
+  response.once('timeout', abort)
+  response.once('close', abortOnResponseClose)
+
   try {
-    return await operation()
+    return await operation(abortController.signal)
   } catch (error) {
     if (error instanceof SharePointResourceError) {
       throw new ApiError(error.statusCode, error.code, error.message)
     }
     throw error
+  } finally {
+    request.off('aborted', abort)
+    response.off('timeout', abort)
+    response.off('close', abortOnResponseClose)
   }
 }
 

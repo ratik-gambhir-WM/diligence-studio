@@ -9,6 +9,8 @@ export type ServerConfig = {
   maxExportJsonBytes: number
   maxPreviewBytes: number
   maxUploadBytes: number
+  microsoftCookieSecure: boolean
+  microsoftSupport: boolean
   port: number
   previewProvider: 'disabled' | 'headless' | 'quicklook'
   previewRenderSize: number
@@ -50,6 +52,16 @@ export function loadServerConfig(environment: NodeJS.ProcessEnv = process.env): 
       DEFAULT_MAX_UPLOAD_BYTES,
       'MAX_PPTX_UPLOAD_BYTES',
     ),
+    microsoftCookieSecure: parseBoolean(
+      environment.MICROSOFT_COOKIE_SECURE,
+      true,
+      'MICROSOFT_COOKIE_SECURE',
+    ),
+    microsoftSupport: parseBoolean(
+      environment.MICROSOFT_SUPPORT,
+      false,
+      'MICROSOFT_SUPPORT',
+    ),
     port: parsePort(environment.PORT),
     previewProvider: parsePreviewProvider(environment.TEMPLATE_PREVIEW_PROVIDER),
     previewRenderSize: parsePreviewRenderSize(environment.TEMPLATE_PREVIEW_RENDER_SIZE),
@@ -75,6 +87,22 @@ function parseAllowedHosts(value: string | undefined) {
   }
 
   return [...new Set(hosts)]
+}
+
+function parseBoolean(value: string | undefined, fallback: boolean, name: string) {
+  if (value === undefined) {
+    return fallback
+  }
+
+  const normalized = value.trim().toLowerCase()
+  if (normalized === 'true') {
+    return true
+  }
+  if (normalized === 'false') {
+    return false
+  }
+
+  throw new Error(`${name} must be true or false.`)
 }
 
 function parsePreviewProvider(value: string | undefined): 'disabled' | 'headless' | 'quicklook' {

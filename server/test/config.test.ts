@@ -26,6 +26,8 @@ describe('server configuration', () => {
       maxExportJsonBytes: 8192,
       maxPreviewBytes: 2048,
       maxUploadBytes: 4096,
+      microsoftCookieSecure: true,
+      microsoftSupport: false,
       port: 4321,
       previewProvider: 'disabled',
       previewRenderSize: 1200,
@@ -50,6 +52,8 @@ describe('server configuration', () => {
       previewProvider: 'headless',
       previewRenderUrl: 'http://localhost:5173/_internal/template-preview',
       requestTimeoutMs: 30_000,
+      microsoftCookieSecure: true,
+      microsoftSupport: false,
     })
     expect(() => loadServerConfig({ HOST: 'localhost' })).toThrow('HOST must be an IP address.')
   })
@@ -70,5 +74,12 @@ describe('server configuration', () => {
       .toMatchObject({ sharePointAllowedHosts: ['contoso.sharepoint.com'] })
     expect(() => loadServerConfig({ SHAREPOINT_ALLOWED_HOSTS: 'https://contoso.sharepoint.com' }))
       .toThrow('SHAREPOINT_ALLOWED_HOSTS must contain comma-separated hostnames.')
+  })
+
+  it('parses Microsoft support and secure-cookie settings', () => {
+    expect(loadServerConfig({ MICROSOFT_SUPPORT: ' TRUE ', MICROSOFT_COOKIE_SECURE: 'false' }))
+      .toMatchObject({ microsoftSupport: true, microsoftCookieSecure: false })
+    expect(() => loadServerConfig({ MICROSOFT_SUPPORT: 'yes' }))
+      .toThrow('MICROSOFT_SUPPORT must be true or false.')
   })
 })

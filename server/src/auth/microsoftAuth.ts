@@ -1,10 +1,13 @@
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 
 import { Router, type Request, type Response } from 'express'
 
 const SESSION_COOKIE_NAME = 'diligence_studio_session'
+const AUTH_STATE_COOKIE_NAME = 'diligence_studio_auth_state'
 const SESSION_TTL_SECONDS = 8 * 60 * 60
 const AUTH_STATE_TTL_MS = 10 * 60 * 1000
+const MAX_PENDING_AUTHORIZATIONS = 1_000
+const MAX_SESSIONS = 10_000
 const MICROSOFT_SCOPES = 'openid profile email offline_access User.Read Files.Read Sites.Read.All'
 
 type MicrosoftAuthConfig = {
@@ -29,18 +32,24 @@ type MicrosoftSession = {
   accessToken: string
   expiresAt: number
   refreshToken?: string
+  sessionExpiresAt: number
   user: MicrosoftUser
+}
+
+export type MicrosoftAuthRouterOptions = {
+  cookieSecure?: boolean
 }
 
 const pendingAuthorizations = new Map<string, PendingAuthorization>()
 const sessions = new Map<string, MicrosoftSession>()
 
-export function createMicrosoftAuthRouter() {
+export function createMicrosoftAuthRouter(options: MicrosoftAuthRouterOptions = {}) {
   const router = Router()
+  const cookieSecure = options.cookieSecure ?? getCookieSecureDefault()
 
   router.get('/login', (_request, response) => {
     try {
-      beginLogin(response)
+      beginLogin(response, cookieSecure)
     } catch (error) {
       if (error instanceof AuthError) {
         response.status(error.statusCode).json({ error: error.message })
@@ -51,25 +60,27 @@ export function createMicrosoftAuthRouter() {
   })
 
   router.get('/callback', async (request, response) => {
-    await completeLogin(request, response)
+    await completeLogin(request, response, cookieSecure)
   })
 
-  router.get('/me', (request, response) => {
-    respondWithCurrentUser(request, response)
+  router.get('/me', async (request, response) => {
+    await respondWithCurrentUser(request, response)
   })
 
   router.post('/logout', (request, response) => {
-    logout(request, response)
+    logout(request, response, cookieSecure)
   })
 
   return router
 }
 
-export async function getMicrosoftAccessToken(request: Request) {
+export async function getMicrosoftAccessToken(request: Request, signal?: AbortSignal) {
+  pruneExpiredSessions()
   const sessionId = getCookie(request, SESSION_COOKIE_NAME)
   const session = sessionId ? sessions.get(sessionId) : undefined
 
-  if (!session) {
+  if (!sessionId || !session || session.sessionExpiresAt <= Date.now()) {
+    if (sessionId) sessions.delete(sessionId)
     throw new AuthError(401, 'Microsoft sign-in is required.')
   }
 
@@ -78,21 +89,36 @@ export async function getMicrosoftAccessToken(request: Request) {
   }
 
   if (!session.refreshToken) {
-    if (sessionId) sessions.delete(sessionId)
+    sessions.delete(sessionId)
     throw new AuthError(401, 'Your Microsoft session has expired. Sign in again.')
   }
 
-  const refreshed = await exchangeToken({
-    grantType: 'refresh_token',
-    refreshToken: session.refreshToken,
-  })
+  let refreshed
+  try {
+    refreshed = await exchangeToken({
+      grantType: 'refresh_token',
+      refreshToken: session.refreshToken,
+      signal,
+    })
+  } catch (error) {
+    if (signal?.aborted) {
+      throw error
+    }
+    sessions.delete(sessionId)
+    throw new AuthError(401, 'Your Microsoft session has expired. Sign in again.')
+  }
   session.accessToken = refreshed.accessToken
   session.expiresAt = refreshed.expiresAt
   session.refreshToken = refreshed.refreshToken ?? session.refreshToken
   return session.accessToken
 }
 
-function beginLogin(response: Response) {
+function beginLogin(response: Response, cookieSecure: boolean) {
+  pruneExpiredAuthorizations()
+  if (pendingAuthorizations.size >= MAX_PENDING_AUTHORIZATIONS) {
+    throw new AuthError(503, 'Microsoft sign-in is temporarily unavailable. Please try again.')
+  }
+
   const config = getAuthConfig()
   const state = randomBytes(32).toString('hex')
   const codeVerifier = randomBytes(48).toString('base64url')
@@ -102,6 +128,14 @@ function beginLogin(response: Response) {
     codeVerifier,
     expiresAt: Date.now() + AUTH_STATE_TTL_MS,
   })
+
+  response.append('Set-Cookie', buildCookie(
+    AUTH_STATE_COOKIE_NAME,
+    state,
+    AUTH_STATE_TTL_MS / 1000,
+    cookieSecure,
+    '/api/auth',
+  ))
 
   const authorizationUrl = new URL(
     `https://login.microsoftonline.com/${encodeURIComponent(config.tenantId)}/oauth2/v2.0/authorize`,
@@ -120,9 +154,10 @@ function beginLogin(response: Response) {
   response.redirect(302, authorizationUrl.toString())
 }
 
-async function completeLogin(request: Request, response: Response) {
+async function completeLogin(request: Request, response: Response, cookieSecure: boolean) {
   const error = request.query.error
   if (typeof error === 'string' && error) {
+    clearAuthStateCookie(response, cookieSecure)
     redirectToLogin(response, 'Microsoft sign-in was cancelled or denied.')
     return
   }
@@ -130,9 +165,18 @@ async function completeLogin(request: Request, response: Response) {
   const state = typeof request.query.state === 'string' ? request.query.state : undefined
   const code = typeof request.query.code === 'string' ? request.query.code : undefined
   const authorization = state ? pendingAuthorizations.get(state) : undefined
+  const stateCookie = getCookie(request, AUTH_STATE_COOKIE_NAME)
 
-  if (!state || !code || !authorization || authorization.expiresAt < Date.now()) {
+  if (
+    !state
+    || !code
+    || !authorization
+    || authorization.expiresAt < Date.now()
+    || !stateCookie
+    || !secureStringEqual(stateCookie, state)
+  ) {
     if (state) pendingAuthorizations.delete(state)
+    clearAuthStateCookie(response, cookieSecure)
     redirectToLogin(response, 'The Microsoft sign-in request expired. Please try again.')
     return
   }
@@ -146,19 +190,27 @@ async function completeLogin(request: Request, response: Response) {
       grantType: 'authorization_code',
     })
     const user = await fetchMicrosoftUser(token.accessToken)
+    pruneExpiredSessions()
+    if (sessions.size >= MAX_SESSIONS) {
+      throw new AuthError(503, 'Microsoft sign-in is temporarily unavailable. Please try again.')
+    }
+
     const sessionId = randomBytes(32).toString('hex')
 
     sessions.set(sessionId, {
       accessToken: token.accessToken,
       expiresAt: token.expiresAt,
       refreshToken: token.refreshToken,
+      sessionExpiresAt: Date.now() + SESSION_TTL_SECONDS * 1000,
       user,
     })
 
-    setSessionCookie(response, sessionId)
+    clearAuthStateCookie(response, cookieSecure)
+    setSessionCookie(response, sessionId, cookieSecure)
     response.redirect(302, getFrontendOrigin())
   } catch {
     console.error('Microsoft sign-in failed.')
+    clearAuthStateCookie(response, cookieSecure)
     redirectToLogin(response, 'Microsoft sign-in could not be completed.')
   }
 }
@@ -168,11 +220,13 @@ async function exchangeToken({
   codeVerifier,
   grantType,
   refreshToken,
+  signal,
 }: {
   code?: string
   codeVerifier?: string
   grantType: 'authorization_code' | 'refresh_token'
   refreshToken?: string
+  signal?: AbortSignal
 }) {
   const config = getAuthConfig()
   const body = new URLSearchParams({
@@ -196,6 +250,7 @@ async function exchangeToken({
       body,
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       method: 'POST',
+      signal,
     },
   )
   const payload = await response.json() as unknown
@@ -229,12 +284,22 @@ async function fetchMicrosoftUser(accessToken: string): Promise<MicrosoftUser> {
   return { email, id, name }
 }
 
-function respondWithCurrentUser(request: Request, response: Response) {
+async function respondWithCurrentUser(request: Request, response: Response) {
+  response.set('Cache-Control', 'private, no-store')
+
+  try {
+    await getMicrosoftAccessToken(request)
+  } catch (error) {
+    if (error instanceof AuthError) {
+      response.status(error.statusCode).json({ authenticated: false })
+      return
+    }
+    throw error
+  }
+
   const sessionId = getCookie(request, SESSION_COOKIE_NAME)
   const session = sessionId ? sessions.get(sessionId) : undefined
-
-  if (!session || (session.expiresAt < Date.now() && !session.refreshToken)) {
-    if (sessionId) sessions.delete(sessionId)
+  if (!session) {
     response.status(401).json({ authenticated: false })
     return
   }
@@ -242,13 +307,15 @@ function respondWithCurrentUser(request: Request, response: Response) {
   response.json({ authenticated: true, user: session.user })
 }
 
-function logout(request: Request, response: Response) {
+function logout(request: Request, response: Response, cookieSecure: boolean) {
   const sessionId = getCookie(request, SESSION_COOKIE_NAME)
   if (sessionId) sessions.delete(sessionId)
 
   response
     .status(204)
-    .setHeader('Set-Cookie', `${SESSION_COOKIE_NAME}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0`)
+    .set('Cache-Control', 'no-store')
+    .append('Set-Cookie', buildCookie(SESSION_COOKIE_NAME, '', 0, cookieSecure, '/'))
+    .append('Set-Cookie', buildCookie(AUTH_STATE_COOKIE_NAME, '', 0, cookieSecure, '/api/auth'))
     .end()
 }
 
@@ -269,12 +336,29 @@ function getAuthConfig(): MicrosoftAuthConfig {
   return { clientId, clientSecret, redirectUri, tenantId }
 }
 
-function setSessionCookie(response: Response, sessionId: string) {
-  const secureAttribute = process.env.MICROSOFT_COOKIE_SECURE === 'true' ? '; Secure' : ''
-  response.setHeader(
-    'Set-Cookie',
-    `${SESSION_COOKIE_NAME}=${sessionId}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${SESSION_TTL_SECONDS}${secureAttribute}`,
-  )
+function setSessionCookie(response: Response, sessionId: string, cookieSecure: boolean) {
+  response.append('Set-Cookie', buildCookie(
+    SESSION_COOKIE_NAME,
+    sessionId,
+    SESSION_TTL_SECONDS,
+    cookieSecure,
+    '/',
+  ))
+}
+
+function clearAuthStateCookie(response: Response, cookieSecure: boolean) {
+  response.append('Set-Cookie', buildCookie(
+    AUTH_STATE_COOKIE_NAME,
+    '',
+    0,
+    cookieSecure,
+    '/api/auth',
+  ))
+}
+
+function buildCookie(name: string, value: string, maxAgeSeconds: number, secure: boolean, path: string) {
+  const secureAttribute = secure ? '; Secure' : ''
+  return `${name}=${encodeURIComponent(value)}; HttpOnly; Path=${path}; SameSite=Lax; Max-Age=${maxAgeSeconds}${secureAttribute}`
 }
 
 function redirectToLogin(response: Response, message: string) {
@@ -298,6 +382,35 @@ function getCookie(request: Request, name: string) {
     return decodeURIComponent(cookie.slice(name.length + 1))
   } catch {
     return undefined
+  }
+}
+
+function getCookieSecureDefault() {
+  const configured = process.env.MICROSOFT_COOKIE_SECURE?.trim().toLowerCase()
+  return configured === undefined ? true : configured === 'true'
+}
+
+function secureStringEqual(left: string, right: string) {
+  const leftBytes = Buffer.from(left)
+  const rightBytes = Buffer.from(right)
+  return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes)
+}
+
+function pruneExpiredAuthorizations() {
+  const now = Date.now()
+  for (const [state, authorization] of pendingAuthorizations) {
+    if (authorization.expiresAt <= now) {
+      pendingAuthorizations.delete(state)
+    }
+  }
+}
+
+function pruneExpiredSessions() {
+  const now = Date.now()
+  for (const [sessionId, session] of sessions) {
+    if (session.sessionExpiresAt <= now) {
+      sessions.delete(sessionId)
+    }
   }
 }
 

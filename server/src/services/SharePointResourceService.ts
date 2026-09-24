@@ -3,7 +3,10 @@ import { Buffer } from 'node:buffer'
 const GRAPH_BASE_URL = 'https://graph.microsoft.com/v1.0'
 const MAX_FILES = 500
 const MAX_FOLDER_DEPTH = 8
+const MAX_FOLDER_ITEMS = 5_000
+const MAX_FOLDER_REQUESTS = 1_000
 const PAGE_SIZE = 200
+const DEFAULT_MAX_FILE_BYTES = 25 * 1024 * 1024
 const MAX_ERROR_BODY_BYTES = 1_000
 const SUPPORTED_EXTENSIONS = new Set([
   'docx',
@@ -60,6 +63,9 @@ export interface SharePointResourceServiceLike {
 
 export type SharePointResourceServiceOptions = {
   allowedHosts?: readonly string[]
+  maxFileBytes?: number
+  maxFolderItems?: number
+  maxFolderRequests?: number
 }
 
 export class SharePointResourceError extends Error {
@@ -75,6 +81,9 @@ export class SharePointResourceError extends Error {
 
 export class SharePointResourceService implements SharePointResourceServiceLike {
   private readonly allowedHosts: ReadonlySet<string>
+  private readonly maxFileBytes: number
+  private readonly maxFolderItems: number
+  private readonly maxFolderRequests: number
 
   constructor(options: SharePointResourceServiceOptions = {}) {
     this.allowedHosts = new Set(
@@ -82,6 +91,9 @@ export class SharePointResourceService implements SharePointResourceServiceLike 
         .map((host) => host.trim().toLowerCase())
         .filter(Boolean),
     )
+    this.maxFileBytes = options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES
+    this.maxFolderItems = options.maxFolderItems ?? MAX_FOLDER_ITEMS
+    this.maxFolderRequests = options.maxFolderRequests ?? MAX_FOLDER_REQUESTS
   }
 
   async resolveResource(
@@ -109,6 +121,7 @@ export class SharePointResourceService implements SharePointResourceServiceLike 
         item.name,
         accessToken,
         signal,
+        { itemCount: 0, requestCount: 0 },
       )
       return {
         files,
@@ -166,12 +179,20 @@ export class SharePointResourceService implements SharePointResourceServiceLike 
       )
     }
 
+    if (metadata.size > this.maxFileBytes) {
+      throw new SharePointResourceError(
+        413,
+        'sharepoint_file_too_large',
+        `The SharePoint file exceeds the ${this.maxFileBytes} byte download limit.`,
+      )
+    }
+
     const response = await this.graphFetch(
       `/drives/${encodeURIComponent(driveId)}/items/${encodeURIComponent(fileId)}/content`,
       accessToken,
       signal,
     )
-    const bytes = Buffer.from(await response.arrayBuffer())
+    const bytes = await readResponseBytes(response, this.maxFileBytes)
     const contentType = metadata.file.mimeType || response.headers.get('content-type') || 'application/octet-stream'
 
     return {
@@ -223,6 +244,7 @@ export class SharePointResourceService implements SharePointResourceServiceLike 
     folderPath: string,
     accessToken: string,
     signal: AbortSignal | undefined,
+    traversal: FolderTraversalState,
     depth = 0,
   ): Promise<SharePointFile[]> {
     if (depth > MAX_FOLDER_DEPTH) {
@@ -237,10 +259,28 @@ export class SharePointResourceService implements SharePointResourceServiceLike 
     let nextUrl = `${GRAPH_BASE_URL}/drives/${encodeURIComponent(driveId)}/items/${encodeURIComponent(folderId)}/children?$select=id,name,size,file,folder,parentReference,webUrl,lastModifiedDateTime&$top=${PAGE_SIZE}`
 
     while (nextUrl) {
+      traversal.requestCount += 1
+      if (traversal.requestCount > this.maxFolderRequests) {
+        throw new SharePointResourceError(
+          413,
+          'sharepoint_folder_request_limit_exceeded',
+          'The SharePoint folder requires too many requests to scan.',
+        )
+      }
+
       const data = await this.graphJsonUrl(nextUrl, accessToken, signal)
       const items = getArrayProperty(data, 'value')
 
       for (const value of items) {
+        traversal.itemCount += 1
+        if (traversal.itemCount > this.maxFolderItems) {
+          throw new SharePointResourceError(
+            413,
+            'sharepoint_folder_item_limit_exceeded',
+            'The SharePoint folder contains too many items to scan.',
+          )
+        }
+
         const item = parseDriveItem(value)
         if (item.folder) {
           files.push(...await this.listFolderFiles(
@@ -249,6 +289,7 @@ export class SharePointResourceService implements SharePointResourceServiceLike 
             joinPath(folderPath, item.name),
             accessToken,
             signal,
+            traversal,
             depth + 1,
           ))
         } else if (item.file && isSupportedFileName(item.name)) {
@@ -300,7 +341,7 @@ export class SharePointResourceService implements SharePointResourceServiceLike 
       return response
     }
 
-    await response.text().then((body) => body.slice(0, MAX_ERROR_BODY_BYTES)).catch(() => '')
+    await readResponseText(response, MAX_ERROR_BODY_BYTES)
     throw new SharePointResourceError(
       response.status === 401 || response.status === 403 ? response.status : 502,
       response.status === 401 || response.status === 403
@@ -311,6 +352,89 @@ export class SharePointResourceService implements SharePointResourceServiceLike 
         : 'Microsoft Graph could not retrieve the SharePoint resource.',
     )
   }
+}
+
+type FolderTraversalState = {
+  itemCount: number
+  requestCount: number
+}
+
+async function readResponseBytes(response: Response, maxBytes: number) {
+  const contentLength = response.headers.get('content-length')
+  if (contentLength && /^\d+$/u.test(contentLength) && Number(contentLength) > maxBytes) {
+    await response.body?.cancel().catch(() => undefined)
+    throw new SharePointResourceError(
+      413,
+      'sharepoint_file_too_large',
+      `The SharePoint file exceeds the ${maxBytes} byte download limit.`,
+    )
+  }
+
+  const reader = response.body?.getReader()
+  if (!reader) {
+    const bytes = Buffer.from(await response.arrayBuffer())
+    if (bytes.length > maxBytes) {
+      throw new SharePointResourceError(
+        413,
+        'sharepoint_file_too_large',
+        `The SharePoint file exceeds the ${maxBytes} byte download limit.`,
+      )
+    }
+    return bytes
+  }
+
+  const chunks: Buffer[] = []
+  let totalBytes = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      totalBytes += value.byteLength
+      if (totalBytes > maxBytes) {
+        await reader.cancel().catch(() => undefined)
+        throw new SharePointResourceError(
+          413,
+          'sharepoint_file_too_large',
+          `The SharePoint file exceeds the ${maxBytes} byte download limit.`,
+        )
+      }
+      chunks.push(Buffer.from(value))
+    }
+  } finally {
+    reader.releaseLock()
+  }
+
+  return Buffer.concat(chunks, totalBytes)
+}
+
+async function readResponseText(response: Response, maxBytes: number) {
+  const reader = response.body?.getReader()
+  if (!reader) {
+    return (await response.text()).slice(0, maxBytes)
+  }
+
+  const decoder = new TextDecoder()
+  let totalBytes = 0
+  let text = ''
+  try {
+    while (totalBytes < maxBytes) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      const remaining = maxBytes - totalBytes
+      const chunk = value.byteLength > remaining ? value.subarray(0, remaining) : value
+      totalBytes += chunk.byteLength
+      text += decoder.decode(chunk, { stream: totalBytes < maxBytes })
+      if (chunk.byteLength < value.byteLength) {
+        await reader.cancel().catch(() => undefined)
+        break
+      }
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  return text + decoder.decode()
 }
 
 function encodeSharingUrl(url: string) {

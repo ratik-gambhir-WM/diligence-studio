@@ -129,6 +129,89 @@ describe('SharePointResourceService', () => {
     })
   })
 
+  it('rejects a file before downloading when metadata exceeds the byte limit', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(jsonResponse({
+      file: { mimeType: 'application/pdf' },
+      id: 'file-1',
+      name: 'diagram.pdf',
+      parentReference: { driveId: 'drive-1' },
+      size: 4,
+      webUrl: 'https://relentlessblue.sharepoint.com/sites/TestSite/diagram.pdf',
+    }))
+    const service = new SharePointResourceService({ maxFileBytes: 3 })
+
+    await expect(service.downloadFile('drive-1', 'file-1', 'access-token'))
+      .rejects.toMatchObject({
+        code: 'sharepoint_file_too_large',
+        statusCode: 413,
+      })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('stops a content response that exceeds the byte limit', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(jsonResponse({
+        file: { mimeType: 'application/pdf' },
+        id: 'file-1',
+        name: 'diagram.pdf',
+        parentReference: { driveId: 'drive-1' },
+        size: 0,
+        webUrl: 'https://relentlessblue.sharepoint.com/sites/TestSite/diagram.pdf',
+      }))
+      .mockResolvedValueOnce(new Response(new Uint8Array([1, 2, 3, 4]), {
+        headers: { 'Content-Type': 'application/pdf' },
+        status: 200,
+      }))
+    const service = new SharePointResourceService({ maxFileBytes: 3 })
+
+    await expect(service.downloadFile('drive-1', 'file-1', 'access-token'))
+      .rejects.toMatchObject({
+        code: 'sharepoint_file_too_large',
+        statusCode: 413,
+      })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('bounds folder traversal by total items, including unsupported items', async () => {
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(jsonResponse({
+        driveItem: {
+          folder: {},
+          id: 'folder-1',
+          name: 'Architecture',
+          parentReference: { driveId: 'drive-1' },
+          webUrl: 'https://relentlessblue.sharepoint.com/sites/TestSite/Architecture',
+        },
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        value: [
+          {
+            file: { mimeType: 'application/zip' },
+            id: 'file-1',
+            name: 'archive.zip',
+            parentReference: { driveId: 'drive-1' },
+            webUrl: 'https://relentlessblue.sharepoint.com/sites/TestSite/Architecture/archive.zip',
+          },
+          {
+            file: { mimeType: 'application/octet-stream' },
+            id: 'file-2',
+            name: 'archive.bin',
+            parentReference: { driveId: 'drive-1' },
+            webUrl: 'https://relentlessblue.sharepoint.com/sites/TestSite/Architecture/archive.bin',
+          },
+        ],
+      }))
+    const service = new SharePointResourceService({ maxFolderItems: 1 })
+
+    await expect(service.resolveResource(
+      'https://relentlessblue.sharepoint.com/:f:/s/TestSite/test-folder?e=abc',
+      'access-token',
+    )).rejects.toMatchObject({
+      code: 'sharepoint_folder_item_limit_exceeded',
+      statusCode: 413,
+    })
+  })
+
   it('rejects links outside the configured SharePoint hosts', async () => {
     const service = new SharePointResourceService()
 

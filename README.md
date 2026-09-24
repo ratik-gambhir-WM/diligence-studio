@@ -22,8 +22,9 @@ http://localhost:43127/api/auth/callback
 
 Grant delegated Microsoft Graph permissions for `User.Read`, `Files.Read`, and `Sites.Read.All`,
 along with the standard OpenID scopes. Copy `.env.example` to `.env` and set the Microsoft values
-before starting the API service. Sessions are held in memory by the API service, so restarting it
-signs users out.
+before starting the API service. Set `MICROSOFT_SUPPORT=true` in both the server `.env` and
+`web/.env` to enable the signed-in experience and server-side API protection. Sessions are held in
+memory by the API service, so restarting it signs users out.
 
 See [docs/microsoft-sign-in-flow-design.md](docs/microsoft-sign-in-flow-design.md) for the complete request sequence, Entra registration steps,
 configuration reference, troubleshooting, and security review notes.

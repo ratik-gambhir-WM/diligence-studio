@@ -30,6 +30,7 @@ describe('SharePoint routes', () => {
     expect(service.resolveResource).toHaveBeenCalledWith(
       'https://relentlessblue.sharepoint.com/:f:/s/TestSite/folder?e=abc',
       'access-token',
+      expect.any(AbortSignal),
     )
   })
 
@@ -51,7 +52,12 @@ describe('SharePoint routes', () => {
     expect(response.headers['content-type']).toContain('application/pdf')
     expect(response.headers['content-disposition']).toBe('attachment; filename="diagram.pdf"')
     expect([...response.body]).toEqual([1, 2, 3])
-    expect(service.downloadFile).toHaveBeenCalledWith('drive-1', 'file-1', 'access-token')
+    expect(service.downloadFile).toHaveBeenCalledWith(
+      'drive-1',
+      'file-1',
+      'access-token',
+      expect.any(AbortSignal),
+    )
   })
 })
 

@@ -94,7 +94,8 @@ Relevant settings:
 | `MICROSOFT_CLIENT_SECRET` | Yes | — | Confidential client secret value; server-only |
 | `MICROSOFT_REDIRECT_URI` | No | `http://localhost:43127/api/auth/callback` | OAuth callback registered in Entra |
 | `MICROSOFT_FRONTEND_ORIGIN` | No | `http://localhost:5173` | Redirect target after login or auth failure |
-| `MICROSOFT_COOKIE_SECURE` | No | `false` | Adds the `Secure` cookie attribute when `true` |
+| `MICROSOFT_SUPPORT` | No | `false` | Enables Microsoft support and server-side protection for `/api/v1` |
+| `MICROSOFT_COOKIE_SECURE` | No | `true` | Adds the `Secure` cookie attribute; set `false` only for local HTTP development |
 
 The root command loads `.env`:
 
@@ -209,10 +210,11 @@ session ID -> access token, token expiry, optional refresh token, normalized use
 The session ID is sent as this cookie:
 
 ```text
-diligence_studio_session=<random-value>; HttpOnly; Path=/; SameSite=Lax; Max-Age=28800
+diligence_studio_session=<random-value>; HttpOnly; Path=/; SameSite=Lax; Max-Age=28800; Secure
 ```
 
-`Secure` is added when `MICROSOFT_COOKIE_SECURE=true`. The API then redirects the browser to
+`Secure` is enabled by default and may be disabled only for local HTTP development with
+`MICROSOFT_COOKIE_SECURE=false`. The API then redirects the browser to
 `MICROSOFT_FRONTEND_ORIGIN`, normally `http://localhost:5173`.
 
 ### 7. The frontend gates the application routes
@@ -221,7 +223,10 @@ After the redirect, `App.tsx` calls `/api/auth/me` again. If the session is vali
 the diagramming, commentary, JSON input, and canvas routes. If not, protected frontend routes redirect
 to `/login`.
 
-This is a browser navigation guard. It is not a substitute for server-side authorization.
+When `MICROSOFT_SUPPORT=true` is enabled in the server environment, the same session is required by
+the versioned `/api/v1` routes. When it is false, those routes retain the anonymous demo behavior.
+The SharePoint routes are available only when the server-side flag is enabled and always require a
+valid Microsoft session.
 
 ## Session refresh
 
@@ -263,22 +268,17 @@ the versioned PowerPoint API routes under `/api/v1`.
 
 These are important review points for anyone extending the flow:
 
-- Sessions and pending authorization state are stored in process memory. A server restart signs out
-  every user, and multiple API instances need shared session storage before production scaling.
-- The current `/api/v1` template/import/export endpoints are not protected by a server-side auth
-  middleware. The frontend hides those routes from unauthenticated users, but a caller can still send
-  requests directly to the API. Add server-side authentication and authorization before treating the
-  sign-in flow as an API security boundary.
+- The application session and pending OAuth state are process-local. A server restart signs users
+  out, and multiple API instances need shared session storage before production scaling.
 - The access and refresh tokens are kept in server memory. They are not persisted, returned to the
   browser, or logged.
 - `SameSite=Lax` supports the top-level OAuth callback while reducing cross-site cookie sending. Use
-  HTTPS and `MICROSOFT_COOKIE_SECURE=true` outside local HTTP development.
+  HTTPS outside local development; secure cookies are the default.
 - The implementation does not yet enforce an allowed email domain or tenant-specific authorization
   rule beyond the Entra tenant selected by `MICROSOFT_TENANT_ID`. If access must be restricted to
   West Monroe users or groups, enforce that policy on the server after identity is established.
-- The OAuth state and session maps have no persistence or distributed cleanup worker. Expired entries
-  are removed during normal validation paths; a long-running production service should add bounded
-  cleanup and capacity limits.
+- Pending OAuth states and sessions are bounded and expired entries are pruned during auth requests,
+  but they remain process-local and are not shared across API instances.
 - The client-side `session` value is navigation state only. It is not an identity proof and must not
   be used as authorization data by a server endpoint.
 
@@ -298,11 +298,11 @@ These are important review points for anyone extending the flow:
 
 Before enabling this flow for a shared or production environment, review:
 
-- server-side authentication middleware for every protected API route;
+- the server-side `MICROSOFT_SUPPORT` flag matches the web build flag;
 - tenant, group, and email-domain authorization rules;
 - persistent, encrypted, or otherwise managed session storage;
 - HTTPS, secure cookies, trusted proxy configuration, and CSRF protections;
 - token refresh failure handling and revocation behavior;
-- bounded cleanup of pending OAuth states and expired sessions;
+- shared, durable session storage before running multiple API instances;
 - automated tests for auth route responses without calling live Entra or Graph services;
 - the minimum Graph scopes required by the features actually being implemented.

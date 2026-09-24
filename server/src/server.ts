@@ -39,15 +39,20 @@ const importService = new ImportService(
   undefined,
   previewGenerator,
 )
-const sharePointService = new SharePointResourceService({
-  allowedHosts: config.sharePointAllowedHosts,
-})
+const sharePointService = config.microsoftSupport
+  ? new SharePointResourceService({
+      allowedHosts: config.sharePointAllowedHosts,
+      maxFileBytes: config.maxUploadBytes,
+    })
+  : undefined
 const server = createServer(createApp({
   exportService,
   importService,
   logger: writeApiLogToConsole,
   maxExportJsonBytes: config.maxExportJsonBytes,
   maxUploadBytes: config.maxUploadBytes,
+  microsoftCookieSecure: config.microsoftCookieSecure,
+  requireMicrosoftAuth: config.microsoftSupport,
   requestTimeoutMs: config.requestTimeoutMs,
   sharePointService,
 }))

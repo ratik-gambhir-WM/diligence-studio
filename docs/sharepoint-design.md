@@ -10,9 +10,10 @@ The implementation supports two related capabilities:
 2. A signed-in user can paste an approved SharePoint file or folder link, select supported files, and
    add the downloaded files to the existing browser-side diagram-generation workflow.
 
-The integration deliberately keeps Microsoft-specific behavior behind the frontend
-MICROSOFT_SUPPORT feature flag for the demo experience. The flag is not a server authorization
-boundary. The SharePoint API still requires a valid Microsoft session when called directly.
+The integration keeps Microsoft-specific behavior behind the `MICROSOFT_SUPPORT` feature flag. The
+web and server environments should use the same value: the web flag controls rendering, while the
+server flag controls SharePoint route registration and versioned API authentication. The SharePoint
+API always requires a valid Microsoft session when enabled.
 
 ## Scope and non-goals
 
@@ -34,11 +35,10 @@ boundary. The SharePoint API still requires a valid Microsoft session when calle
 - Adding SharePoint authorization independent of Microsoft Graph permissions.
 - Passing SharePoint URLs directly to OpenAI.
 - Exposing Microsoft access or refresh tokens to browser JavaScript.
-- Enforcing the frontend feature flag on the server API.
 
-The server endpoints remain available to authenticated clients because the current requirement is
-demo-only frontend gating. A future production deployment should add explicit server-side feature
-configuration and authorization if the endpoints must be disabled globally.
+When Microsoft support is enabled, the server endpoints are available only to authenticated clients.
+When it is disabled, the server does not register the SharePoint routes and leaves the existing
+anonymous demo API behavior in place.
 
 ## Architecture
 
@@ -76,19 +76,21 @@ resource metadata and the downloaded file bytes.
 
 ## Feature flag and configuration
 
-The frontend flag is configured in web/.env or web/.env.example:
+The flag is configured in both the server `.env` and `web/.env`:
 
     MICROSOFT_SUPPORT=false
 
 Vite loads the web workspace environment and converts the value to a public boolean:
 
 - web/vite.config.ts reads MICROSOFT_SUPPORT.
+- server/src/config.ts reads MICROSOFT_SUPPORT for route registration and API authentication.
 - Only a case-insensitive, whitespace-trimmed value of true enables the feature.
 - The Vite definition is exposed as VITE_MICROSOFT_SUPPORT.
 - web/src/lib/microsoftSupport.ts applies the same strict true parsing in the browser.
 - Unset, empty, false, and any other value disable the feature.
 
-This is build-time configuration. Restart the Vite process after changing the file.
+The web value is build-time configuration and the server value is read at startup. Restart/rebuild
+the corresponding process after changing either value.
 
 When MICROSOFT_SUPPORT is false:
 
@@ -96,6 +98,7 @@ When MICROSOFT_SUPPORT is false:
 - The /login route redirects to the anonymous demo app.
 - SharePoint URL, loading, picker, and error controls are not rendered.
 - SharePoint resolve, file-selection, and download handlers return before making requests.
+- The server does not register the SharePoint routes, and `/api/v1` retains anonymous demo behavior.
 
 When MICROSOFT_SUPPORT is true:
 
@@ -103,6 +106,7 @@ When MICROSOFT_SUPPORT is true:
 - Protected routes redirect unauthenticated users to /login.
 - The SharePoint controls are rendered.
 - SharePoint handlers may call the browser API client.
+- The server registers SharePoint routes and requires the Microsoft session for `/api/v1`.
 
 The root .env.example contains server-side Microsoft and SharePoint settings. It is separate from
 web/.env.example, which contains browser-facing Vite settings. Microsoft client secrets must remain
@@ -187,8 +191,9 @@ downloaded bytes with:
 - Cache-Control: private, no-store.
 - X-Content-Type-Options: nosniff.
 
-The Graph content URL is never sent to the browser. The browser calls the application endpoint and
-receives a File constructed from the response bytes.
+Downloads are limited to the server's configured upload limit (25 MiB by default) and are read with
+a bounded stream. The Graph content URL is never sent to the browser. The browser calls the
+application endpoint and receives a File constructed from the response bytes.
 
 ### Error envelope
 
@@ -206,7 +211,10 @@ Common error codes include:
 | sharepoint_access_denied | Graph returned 401 or 403 |
 | sharepoint_unsupported_file_type | A shared file has an unsupported extension |
 | sharepoint_missing_drive | Graph item did not identify a document-library drive |
-| sharepoint_file_limit_exceeded | Folder traversal exceeded the file limit |
+| sharepoint_file_limit_exceeded | Folder traversal exceeded the supported-file limit |
+| sharepoint_folder_item_limit_exceeded | Folder traversal exceeded the total-item limit |
+| sharepoint_folder_request_limit_exceeded | Folder traversal exceeded the Graph request limit |
+| sharepoint_file_too_large | A downloaded file exceeded the byte limit |
 | sharepoint_folder_too_deep | Folder traversal exceeded the nesting limit |
 | invalid_sharepoint_response | Graph returned a shape the service could not safely interpret |
 
@@ -269,7 +277,7 @@ The implementation:
 - Recurses through nested folders.
 - Retains only supported file extensions.
 - Builds a display path such as Architecture/Archive.
-- Stops with an error after 500 files.
+- Stops with an error after 500 supported files, 5,000 total items, or 1,000 Graph list requests.
 - Stops with an error beyond depth 8.
 - Accepts only next links that remain under the Microsoft Graph v1.0 base URL.
 
@@ -402,8 +410,9 @@ nosniff. API errors use sanitized application messages rather than provider resp
 
 ### UI feature boundary
 
-MICROSOFT_SUPPORT controls browser behavior only. Defensive checks remain in the App.tsx handlers so
-an accidentally retained UI callback cannot start SharePoint work while the flag is false.
+MICROSOFT_SUPPORT controls browser behavior and server route registration. Defensive checks remain
+in the App.tsx handlers so an accidentally retained UI callback cannot start SharePoint work while
+the flag is false.
 
 ### Logging
 
@@ -438,7 +447,8 @@ the sum of the user attachments and those candidate images.
 | MICROSOFT_CLIENT_SECRET | none | Confidential client secret value |
 | MICROSOFT_REDIRECT_URI | http://localhost:43127/api/auth/callback | Entra callback |
 | MICROSOFT_FRONTEND_ORIGIN | http://localhost:5173 | Post-login frontend origin |
-| MICROSOFT_COOKIE_SECURE | false | Adds Secure to the session cookie |
+| MICROSOFT_SUPPORT | false | Enables the web feature and server-side API/SharePoint protection |
+| MICROSOFT_COOKIE_SECURE | true | Adds Secure to the session cookie; set false only for local HTTP development |
 | SHAREPOINT_ALLOWED_HOSTS | relentlessblue.sharepoint.com | Comma-separated approved SharePoint hosts |
 
 These values belong in the root server environment.
@@ -447,7 +457,7 @@ These values belong in the root server environment.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| MICROSOFT_SUPPORT | false | Build-time frontend feature flag |
+| MICROSOFT_SUPPORT | false | Frontend feature flag; keep aligned with the server value |
 | VITE_API_BASE_URL | /api/v1 | Browser API prefix |
 | VITE_API_PROXY_TARGET | http://127.0.0.1:43127 | Local Vite proxy target |
 
@@ -460,6 +470,7 @@ The implementation has tests at each boundary:
 
 | Area | Tests |
 | --- | --- |
+| Microsoft auth flow | server/test/microsoftAuth.test.ts |
 | Graph resource service | server/test/sharePointResourceService.test.ts |
 | Express SharePoint routes | server/test/sharePointRoutes.test.ts |
 | Browser SharePoint API client | web/src/lib/api/sharepointApi.test.ts |
@@ -476,7 +487,8 @@ hidden when the feature is disabled and present when enabled.
 ## Known limitations and extension points
 
 - Sessions are process-local and disappear on server restart.
-- The frontend flag is build-time and does not disable already-running server routes.
+- The web and server flags must be changed together; restarting/rebuilding is required after changing
+  either environment.
 - The browser OpenAI adapter sends file data directly from the client under the existing demo trust
   model.
 - Folder selection downloads the chosen files into browser memory before model submission.
@@ -485,6 +497,5 @@ hidden when the feature is disabled and present when enabled.
 - The Graph permission scope and host allowlist are intentionally broad enough for the configured
   demo tenant but should be reviewed for a production tenant.
 
-Potential future work includes server-side feature gating, durable session/token storage, server-side
-document staging, streaming or size limits for SharePoint downloads, richer audit logging without
-document content, and a first-class mixed local/SharePoint attachment model.
+Potential future work includes durable session/token storage, server-side document staging, richer
+audit logging without document content, and a first-class mixed local/SharePoint attachment model.
