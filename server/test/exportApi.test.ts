@@ -20,7 +20,7 @@ const POWERPOINT_CONTENT_TYPE =
 let templates: SqliteTemplateRepository
 
 beforeEach(() => {
-  templates = new SqliteTemplateRepository(':memory:')
+  templates = new SqliteTemplateRepository()
 })
 
 afterEach(() => {
@@ -189,9 +189,9 @@ describe('export API', () => {
       exportService: {
         export: async () => {
           await new Promise((resolve) => setTimeout(resolve, 50))
-          return { bytes: new Uint8Array(), fileName: 'late.pptx', warnings: [] }
+          return { bytes: Buffer.alloc(0), fileName: 'late.pptx', warnings: [] }
         },
-        insert: async () => ({ bytes: new Uint8Array(), fileName: 'late.pptx', warnings: [] }),
+        insert: async () => ({ bytes: Buffer.alloc(0), fileName: 'late.pptx', warnings: [] }),
       },
       importService: new ImportTemplateService(new LibraryPowerPointConverter(), templates),
       logger: (entry) => logs.push(entry),
@@ -287,7 +287,7 @@ describe('export API', () => {
         export: async () => {
           throw new TypeError('sensitive provider response')
         },
-        insert: async () => ({ bytes: new Uint8Array(), fileName: 'unused.pptx', warnings: [] }),
+        insert: async () => ({ bytes: Buffer.alloc(0), fileName: 'unused.pptx', warnings: [] }),
       },
       importService: new ImportTemplateService(new LibraryPowerPointConverter(), templates),
       logger: (entry) => logs.push(entry),

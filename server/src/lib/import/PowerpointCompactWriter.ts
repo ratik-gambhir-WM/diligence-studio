@@ -1,7 +1,3 @@
-import { createHash } from 'node:crypto'
-import { mkdir, writeFile } from 'node:fs/promises'
-import path from 'node:path'
-
 import type {
   NormalizedElement,
   NormalizedImageElement,
@@ -22,43 +18,31 @@ import type {
 import { optionalNumber, prune, round } from './PowerpointImportUtils'
 import { DEFAULT_OPACITY, DEFAULT_TEXT_PADDING_PT } from '../shared/PowerpointConstants'
 
-export async function compactPresentation(
-  presentation: NormalizedPresentation,
-  outputPath: string,
-  options: { embedAssets?: boolean } = {},
-) {
+export function compactPresentation(presentation: NormalizedPresentation) {
   return {
     presentation: {
       title: presentation.meta.title,
       preserveElementOrder: presentation.meta.preserveElementOrder,
       showBranding: presentation.meta.showBranding,
-      slides: await Promise.all(
-        presentation.slides.map(async (slide) => ({
-          id: slide.id,
-          name: slide.name,
-          width: round(slide.width),
-          height: round(slide.height),
-          backgroundColor: slide.backgroundColor,
-          elements: await Promise.all(
-            slide.elements.map((element) => compactElement(element, outputPath, options)),
-          ),
-        })),
-      ),
+      slides: presentation.slides.map((slide) => ({
+        id: slide.id,
+        name: slide.name,
+        width: round(slide.width),
+        height: round(slide.height),
+        backgroundColor: slide.backgroundColor,
+        elements: slide.elements.map(compactElement),
+      })),
     },
   }
 }
 
-async function compactElement(
-  element: NormalizedElement,
-  outputPath: string,
-  options: { embedAssets?: boolean },
-): Promise<PowerPointCanvasElement> {
+function compactElement(element: NormalizedElement): PowerPointCanvasElement {
   if (element.kind === 'line') {
     return compactLine(element)
   }
 
   if (element.kind === 'image') {
-    return compactImage(element, outputPath, options)
+    return compactImage(element)
   }
 
   if (element.kind === 'text') {
@@ -152,11 +136,7 @@ function compactLine(element: NormalizedLineElement): PowerPointCanvasLineElemen
   })
 }
 
-async function compactImage(
-  element: NormalizedImageElement,
-  outputPath: string,
-  options: { embedAssets?: boolean },
-): Promise<PowerPointCanvasImageElement> {
+function compactImage(element: NormalizedImageElement): PowerPointCanvasImageElement {
   return prune({
     id: element.id,
     type: 'image' as const,
@@ -168,7 +148,7 @@ async function compactImage(
     flipH: element.flipH || undefined,
     flipV: element.flipV || undefined,
     opacity: optionalNumber(element.opacity, DEFAULT_OPACITY),
-    src: options.embedAssets ? element.src : await externalizeImage(element.src, outputPath),
+    src: element.src,
     fit: element.fit,
     crop: element.crop
       ? prune({
@@ -200,37 +180,4 @@ function compactRuns(runs: NormalizedTextRun[]): PowerPointCanvasTextRun[] | und
       breakLine: run.breakLine || undefined,
     }),
   )
-}
-
-async function externalizeImage(src: string, outputPath: string) {
-  const dataUri = /^data:([^;,]+);base64,(.+)$/u.exec(src)
-  if (!dataUri) {
-    return src
-  }
-
-  const [, mimeType, base64] = dataUri
-  const extension = mimeTypeToExtension(mimeType)
-  const digest = createHash('sha256').update(base64).digest('hex').slice(0, 12)
-  const fileName = `image-${digest}${extension}`
-  const assetDir = path.join(path.dirname(outputPath), 'assets')
-  const assetPath = path.join(assetDir, fileName)
-  await mkdir(assetDir, { recursive: true })
-  await writeFile(assetPath, Buffer.from(base64, 'base64'))
-  return `./assets/${fileName}`
-}
-
-function mimeTypeToExtension(mimeType: string) {
-  if (mimeType === 'image/jpeg') {
-    return '.jpg'
-  }
-  if (mimeType === 'image/svg+xml') {
-    return '.svg'
-  }
-  if (mimeType === 'image/gif') {
-    return '.gif'
-  }
-  if (mimeType === 'image/emf') {
-    return '.emf'
-  }
-  return '.png'
 }

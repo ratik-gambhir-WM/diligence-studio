@@ -45,3 +45,16 @@ export function createBatchImportRouter(service: ImportService, maxUploadBytes: 
 
   return router
 }
+
+/** Mount the sole public v2 endpoint with the existing bounded raw PowerPoint parser. */
+export function createImportV2Router(service: ImportService, maxUploadBytes: number) {
+  const router = Router()
+  const handlers = createImportHandlers(service)
+  router.post(
+    '/',
+    raw({ inflate: false, limit: maxUploadBytes, type: POWERPOINT_CONTENT_TYPE }),
+    handlers.createV2,
+  )
+  router.all('/', (_request, response) => response.status(405).end())
+  return router
+}

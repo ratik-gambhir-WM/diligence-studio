@@ -1,12 +1,21 @@
-import { mkdirSync } from 'node:fs'
-import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
 import { DEFAULT_APP_ID } from '../appIdentity'
 import type { PowerPointCanvasJson } from '../lib/import/PowerpointImportTypes'
+import { deserializeEmbedding, serializeEmbedding } from '../lib/retrieval/SlideVector'
+import { normalizeSlideRetrievalMetadata } from '../lib/retrieval/SlideRetrievalMetadata'
 import type {
   AppRegistration,
+  CompleteSlideClassification,
+  CompleteSlideProcessing,
+  PendingSlideClassification,
+  RetrievalClassificationRecord,
+  SlideClassificationJob,
+  SlideClassificationStatus,
+  SlideEmbeddingJob,
+  SlideEmbeddingStatus,
   StoredApp,
+  StoredSlideClassification,
   StoredTemplate,
   StoredTemplateMetadata,
   StoredTemplatePreview,
@@ -63,19 +72,51 @@ type AppRow = {
   metadata_json: string
 }
 
-const SCHEMA_VERSION = 3
+type ClassificationRow = {
+  attempt_count: number
+  classified_at: string | null
+  classified_fingerprint: string | null
+  embedding_attempt_count: number
+  embedding_dimensions: number | null
+  embedding_last_error_code: string | null
+  embedding_model: string | null
+  embedding_next_attempt_at: string | null
+  embedding_status: SlideEmbeddingStatus
+  capability_embedding: Uint8Array | null
+  capability_embedding_document: string | null
+  capability_embedding_fingerprint: string | null
+  input_fingerprint: string
+  last_error_code: string | null
+  metadata_json: string | null
+  model: string | null
+  next_attempt_at: string | null
+  prompt_version: string
+  schema_version: number
+  subject_embedding: Uint8Array | null
+  subject_embedding_document: string | null
+  subject_embedding_fingerprint: string | null
+  status: SlideClassificationStatus
+  template_id: string
+}
+
+type RetrievalRow = ClassificationRow & {
+  created_at: string
+  kind: TemplateKind
+  preview_available: number
+  template_json: string
+}
+
+const SCHEMA_VERSION = 5
 
 export class SqliteTemplateRepository implements TemplateRepository {
   readonly #database: DatabaseSync
 
-  constructor(databasePath: string) {
-    if (databasePath !== ':memory:') {
-      mkdirSync(path.dirname(databasePath), { recursive: true })
-    }
-
-    this.#database = new DatabaseSync(databasePath)
+  constructor(initialize?: (database: DatabaseSync) => void) {
+    this.#database = new DatabaseSync(':memory:')
+    initialize?.(this.#database)
     this.#database.exec('PRAGMA foreign_keys = ON')
-    this.#database.exec('PRAGMA journal_mode = WAL')
+    this.#database.exec('PRAGMA journal_mode = MEMORY')
+    this.#database.exec('PRAGMA temp_store = MEMORY')
     this.#migrate()
   }
 
@@ -168,10 +209,84 @@ export class SqliteTemplateRepository implements TemplateRepository {
         `)
       }
 
+      if (version.user_version < 5) {
+        this.#database.exec(`
+          DROP TABLE IF EXISTS slide_classifications_fts;
+          DROP TABLE IF EXISTS slide_classifications;
+
+          CREATE TABLE slide_classifications (
+            template_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL CHECK (status IN ('pending', 'processing', 'ready', 'failed')),
+            metadata_json TEXT CHECK (metadata_json IS NULL OR json_valid(metadata_json)),
+            archetype TEXT,
+            layout_type TEXT,
+            content_density TEXT CHECK (
+              content_density IS NULL OR content_density IN ('low', 'medium', 'high')
+            ),
+            embedding_status TEXT NOT NULL DEFAULT 'not_ready' CHECK (
+              embedding_status IN ('not_ready', 'pending', 'processing', 'ready', 'failed')
+            ),
+            subject_embedding_document TEXT,
+            subject_embedding BLOB,
+            subject_embedding_fingerprint TEXT,
+            capability_embedding_document TEXT,
+            capability_embedding BLOB,
+            capability_embedding_fingerprint TEXT,
+            embedding_model TEXT,
+            embedding_dimensions INTEGER CHECK (embedding_dimensions IS NULL OR embedding_dimensions > 0),
+            embedding_attempt_count INTEGER NOT NULL DEFAULT 0,
+            embedding_next_attempt_at TEXT,
+            embedding_lease_expires_at TEXT,
+            embedding_last_error_code TEXT,
+            input_fingerprint TEXT NOT NULL,
+            classified_fingerprint TEXT,
+            schema_version INTEGER NOT NULL CHECK (schema_version = 2),
+            prompt_version TEXT NOT NULL,
+            model TEXT,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at TEXT,
+            lease_expires_at TEXT,
+            classified_at TEXT,
+            last_error_code TEXT,
+            FOREIGN KEY (template_id) REFERENCES templates(template_id) ON DELETE CASCADE
+          ) STRICT;
+
+          CREATE INDEX slide_classifications_classification_jobs_idx
+            ON slide_classifications (status, next_attempt_at, lease_expires_at);
+          CREATE INDEX slide_classifications_embedding_jobs_idx
+            ON slide_classifications (embedding_status, embedding_next_attempt_at, embedding_lease_expires_at);
+          CREATE INDEX slide_classifications_schema_idx
+            ON slide_classifications (schema_version, status, embedding_status);
+
+          CREATE VIRTUAL TABLE slide_classifications_fts USING fts5(
+            template_id UNINDEXED,
+            title,
+            subject_summary,
+            domains,
+            topics,
+            technologies,
+            entities,
+            claims,
+            synonyms,
+            intents,
+            information_types,
+            audience,
+            archetype,
+            content_slots,
+            visual_structure,
+            retrieval_keywords,
+            tokenize = 'unicode61 remove_diacritics 2'
+          );
+        `)
+      }
+
       this.#database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
       this.#database.exec('COMMIT')
     } catch (error) {
       this.#database.exec('ROLLBACK')
+      if (error instanceof Error && /no such module:\s*fts5/iu.test(error.message)) {
+        throw new Error('The SQLite runtime must provide the FTS5 extension.', { cause: error })
+      }
       throw error
     }
   }
@@ -199,6 +314,59 @@ export class SqliteTemplateRepository implements TemplateRepository {
           appId,
         )
       }
+      this.#database.exec('COMMIT')
+    } catch (error) {
+      this.#database.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  insertWithPendingClassification(
+    record: TemplateInsert,
+    pending: PendingSlideClassification,
+    appId: string = DEFAULT_APP_ID,
+  ) {
+    this.#insertWithClassification(record, pending, 'pending', 0, appId)
+  }
+
+  insertWithProcessingClassification(
+    record: TemplateInsert,
+    pending: PendingSlideClassification,
+    appId: string = DEFAULT_APP_ID,
+  ) {
+    this.#insertWithClassification(record, pending, 'processing', 1, appId)
+  }
+
+  #insertWithClassification(
+    record: TemplateInsert,
+    pending: PendingSlideClassification,
+    status: 'pending' | 'processing',
+    attemptCount: number,
+    appId: string,
+  ) {
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      this.#writeTemplateAndAssets(
+        'insert',
+        record.template,
+        record.assets,
+        record.metadata ?? defaultMetadata(record.template.templateId),
+        record.preview,
+        appId,
+      )
+      this.#database.prepare(`
+        INSERT INTO slide_classifications (
+          template_id, status, embedding_status, input_fingerprint, schema_version,
+          prompt_version, attempt_count
+        ) VALUES (?, ?, 'not_ready', ?, ?, ?, ?)
+      `).run(
+        record.template.templateId,
+        status,
+        pending.inputFingerprint,
+        pending.schemaVersion,
+        pending.promptVersion,
+        attemptCount,
+      )
       this.#database.exec('COMMIT')
     } catch (error) {
       this.#database.exec('ROLLBACK')
@@ -428,6 +596,15 @@ export class SqliteTemplateRepository implements TemplateRepository {
     }
   }
 
+  hasTemplate(templateId: string, appId: string = DEFAULT_APP_ID) {
+    const row = this.#database.prepare(`
+      SELECT 1
+      FROM app_templates
+      WHERE app_id = ? AND template_id = ?
+    `).get(appId, templateId) as { 1: number } | undefined
+    return row !== undefined
+  }
+
   list(kind?: TemplateKind, appId: string = DEFAULT_APP_ID): StoredTemplateSummary[] {
     const rows = this.#database
       .prepare(`
@@ -525,12 +702,441 @@ export class SqliteTemplateRepository implements TemplateRepository {
       : undefined
   }
 
+  findSlideClassification(templateId: string): StoredSlideClassification | undefined {
+    const row = this.#database.prepare(`
+      SELECT * FROM slide_classifications WHERE template_id = ?
+    `).get(templateId) as ClassificationRow | undefined
+    return row ? mapClassificationRow(row) : undefined
+  }
+
+  claimNextSlideClassification(now: string, leaseExpiresAt: string): SlideClassificationJob | undefined {
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      this.#database.prepare(`
+        UPDATE slide_classifications
+        SET status = 'pending', lease_expires_at = NULL
+        WHERE status = 'processing' AND lease_expires_at <= ?
+      `).run(now)
+      const candidate = this.#database.prepare(`
+        SELECT template_id
+        FROM slide_classifications
+        WHERE status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+        ORDER BY COALESCE(next_attempt_at, ''), template_id
+        LIMIT 1
+      `).get(now) as { template_id: string } | undefined
+      if (!candidate) {
+        this.#database.exec('COMMIT')
+        return undefined
+      }
+      this.#database.prepare(`
+        UPDATE slide_classifications
+        SET status = 'processing', attempt_count = attempt_count + 1,
+            lease_expires_at = ?, next_attempt_at = NULL, last_error_code = NULL
+        WHERE template_id = ? AND status = 'pending'
+      `).run(leaseExpiresAt, candidate.template_id)
+      const row = this.#database.prepare(`
+        SELECT
+          templates.template_id,
+          templates.template_json,
+          template_metadata.kind,
+          template_previews.content_type,
+          template_previews.preview_data,
+          template_previews.width,
+          template_previews.height,
+          slide_classifications.attempt_count,
+          slide_classifications.input_fingerprint
+        FROM templates
+        JOIN template_metadata USING (template_id)
+        JOIN slide_classifications USING (template_id)
+        LEFT JOIN template_previews USING (template_id)
+        WHERE templates.template_id = ?
+      `).get(candidate.template_id) as {
+        attempt_count: number
+        content_type: 'image/png' | null
+        height: number | null
+        input_fingerprint: string
+        kind: TemplateKind
+        preview_data: Uint8Array | null
+        template_id: string
+        template_json: string
+        width: number | null
+      }
+      this.#database.exec('COMMIT')
+      const templateJson = JSON.parse(row.template_json) as PowerPointCanvasJson
+      const job: SlideClassificationJob = {
+        attemptCount: row.attempt_count,
+        inputFingerprint: row.input_fingerprint,
+        kind: row.kind,
+        template: { templateId: row.template_id, templateJson },
+        title: templateJson.presentation.title,
+      }
+      if (
+        row.content_type === 'image/png'
+        && row.preview_data !== null
+        && row.width !== null
+        && row.height !== null
+      ) {
+        job.preview = {
+          bytes: Buffer.from(row.preview_data),
+          contentType: row.content_type,
+          height: row.height,
+          templateId: row.template_id,
+          width: row.width,
+        }
+      }
+      return job
+    } catch (error) {
+      this.#database.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  completeSlideClassification(result: CompleteSlideClassification) {
+    const metadata = normalizeSlideRetrievalMetadata(result.metadata)
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      const update = this.#database.prepare(`
+        UPDATE slide_classifications
+        SET status = 'ready', metadata_json = json(?), archetype = ?, layout_type = ?,
+            content_density = ?,
+            classified_fingerprint = ?, model = ?, classified_at = ?,
+            lease_expires_at = NULL, next_attempt_at = NULL, last_error_code = NULL,
+            embedding_status = 'pending', embedding_model = NULL, embedding_dimensions = NULL,
+            subject_embedding_document = ?, subject_embedding = NULL,
+            subject_embedding_fingerprint = ?, capability_embedding_document = ?,
+            capability_embedding = NULL, capability_embedding_fingerprint = ?,
+            embedding_next_attempt_at = NULL, embedding_lease_expires_at = NULL,
+            embedding_last_error_code = NULL
+        WHERE template_id = ? AND status = 'processing' AND input_fingerprint = ?
+      `).run(
+        JSON.stringify(metadata),
+        metadata.template_fit.archetype,
+        metadata.visual.layout_type,
+        metadata.visual.content_density,
+        result.classifiedFingerprint,
+        result.model,
+        result.classifiedAt,
+        result.subjectEmbeddingDocument,
+        result.subjectEmbeddingFingerprint,
+        result.capabilityEmbeddingDocument,
+        result.capabilityEmbeddingFingerprint,
+        result.templateId,
+        result.classifiedFingerprint,
+      )
+      if (update.changes !== 1) throw new Error('The classification job lease is no longer active.')
+      this.#replaceFtsRow(result.templateId, metadata)
+      this.#database.exec('COMMIT')
+    } catch (error) {
+      this.#database.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  recordSlideClassificationFailure(templateId: string, errorCode: string, retryAt: string | null) {
+    this.#database.prepare(`
+      UPDATE slide_classifications
+      SET status = ?, next_attempt_at = ?, lease_expires_at = NULL, last_error_code = ?
+      WHERE template_id = ? AND status = 'processing'
+    `).run(retryAt === null ? 'failed' : 'pending', retryAt, errorCode, templateId)
+  }
+
+  claimNextSlideEmbedding(now: string, leaseExpiresAt: string): SlideEmbeddingJob | undefined {
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      this.#database.prepare(`
+        UPDATE slide_classifications
+        SET embedding_status = 'pending', embedding_lease_expires_at = NULL
+        WHERE embedding_status = 'processing' AND embedding_lease_expires_at <= ?
+      `).run(now)
+      const row = this.#database.prepare(`
+        SELECT template_id, subject_embedding_document, subject_embedding_fingerprint,
+          capability_embedding_document, capability_embedding_fingerprint
+        FROM slide_classifications
+        WHERE embedding_status = 'pending'
+          AND subject_embedding_document IS NOT NULL
+          AND subject_embedding_fingerprint IS NOT NULL
+          AND capability_embedding_document IS NOT NULL
+          AND capability_embedding_fingerprint IS NOT NULL
+          AND (embedding_next_attempt_at IS NULL OR embedding_next_attempt_at <= ?)
+        ORDER BY COALESCE(embedding_next_attempt_at, ''), template_id
+        LIMIT 1
+      `).get(now) as {
+        capability_embedding_document: string
+        capability_embedding_fingerprint: string
+        subject_embedding_document: string
+        subject_embedding_fingerprint: string
+        template_id: string
+      } | undefined
+      if (!row) {
+        this.#database.exec('COMMIT')
+        return undefined
+      }
+      this.#database.prepare(`
+        UPDATE slide_classifications
+        SET embedding_status = 'processing', embedding_attempt_count = embedding_attempt_count + 1,
+            embedding_lease_expires_at = ?, embedding_next_attempt_at = NULL,
+            embedding_last_error_code = NULL
+        WHERE template_id = ? AND embedding_status = 'pending'
+      `).run(leaseExpiresAt, row.template_id)
+      const { embedding_attempt_count } = this.#database.prepare(`
+        SELECT embedding_attempt_count FROM slide_classifications WHERE template_id = ?
+      `).get(row.template_id) as { embedding_attempt_count: number }
+      this.#database.exec('COMMIT')
+      return {
+        attemptCount: embedding_attempt_count,
+        capabilityDocument: row.capability_embedding_document,
+        capabilityFingerprint: row.capability_embedding_fingerprint,
+        subjectDocument: row.subject_embedding_document,
+        subjectFingerprint: row.subject_embedding_fingerprint,
+        templateId: row.template_id,
+      }
+    } catch (error) {
+      this.#database.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  completeSlideEmbedding(
+    templateId: string,
+    subjectFingerprint: string,
+    capabilityFingerprint: string,
+    subjectVector: readonly number[],
+    capabilityVector: readonly number[],
+    model: string,
+    dimensions: number,
+  ) {
+    const subjectBytes = serializeEmbedding(subjectVector)
+    const capabilityBytes = serializeEmbedding(capabilityVector)
+    if (subjectVector.length !== dimensions || capabilityVector.length !== dimensions) {
+      throw new Error('Embedding dimensions do not match the vectors.')
+    }
+    const result = this.#database.prepare(`
+      UPDATE slide_classifications
+      SET embedding_status = 'ready', subject_embedding = ?, capability_embedding = ?, embedding_model = ?,
+          embedding_dimensions = ?, embedding_lease_expires_at = NULL,
+          embedding_next_attempt_at = NULL, embedding_last_error_code = NULL
+      WHERE template_id = ? AND embedding_status = 'processing'
+        AND subject_embedding_fingerprint = ? AND capability_embedding_fingerprint = ?
+    `).run(
+      subjectBytes,
+      capabilityBytes,
+      model,
+      dimensions,
+      templateId,
+      subjectFingerprint,
+      capabilityFingerprint,
+    )
+    if (result.changes !== 1) throw new Error('The embedding job lease is no longer active.')
+  }
+
+  completeSlideProcessing(result: CompleteSlideProcessing) {
+    const metadata = normalizeSlideRetrievalMetadata(result.metadata)
+    const subjectBytes = serializeEmbedding(result.subjectVector)
+    const capabilityBytes = serializeEmbedding(result.capabilityVector)
+    if (
+      result.subjectVector.length !== result.embeddingDimensions
+      || result.capabilityVector.length !== result.embeddingDimensions
+    ) {
+      throw new Error('Embedding dimensions do not match the vectors.')
+    }
+
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      const update = this.#database.prepare(`
+        UPDATE slide_classifications
+        SET status = 'ready', metadata_json = json(?), archetype = ?, layout_type = ?,
+            content_density = ?,
+            classified_fingerprint = ?, model = ?, classified_at = ?,
+            lease_expires_at = NULL, next_attempt_at = NULL, last_error_code = NULL,
+            embedding_status = 'ready', subject_embedding_document = ?, subject_embedding = ?,
+            subject_embedding_fingerprint = ?, capability_embedding_document = ?,
+            capability_embedding = ?, capability_embedding_fingerprint = ?,
+            embedding_model = ?, embedding_dimensions = ?,
+            embedding_attempt_count = 1, embedding_next_attempt_at = NULL,
+            embedding_lease_expires_at = NULL, embedding_last_error_code = NULL
+        WHERE template_id = ? AND status = 'processing' AND input_fingerprint = ?
+      `).run(
+        JSON.stringify(metadata),
+        metadata.template_fit.archetype,
+        metadata.visual.layout_type,
+        metadata.visual.content_density,
+        result.classifiedFingerprint,
+        result.model,
+        result.classifiedAt,
+        result.subjectEmbeddingDocument,
+        subjectBytes,
+        result.subjectEmbeddingFingerprint,
+        result.capabilityEmbeddingDocument,
+        capabilityBytes,
+        result.capabilityEmbeddingFingerprint,
+        result.embeddingModel,
+        result.embeddingDimensions,
+        result.templateId,
+        result.classifiedFingerprint,
+      )
+      if (update.changes !== 1) {
+        throw new Error('The synchronous slide processing state is no longer active.')
+      }
+      this.#replaceFtsRow(result.templateId, metadata)
+      this.#database.exec('COMMIT')
+    } catch (error) {
+      this.#database.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  recordSlideEmbeddingFailure(templateId: string, errorCode: string, retryAt: string | null) {
+    this.#database.prepare(`
+      UPDATE slide_classifications
+      SET embedding_status = ?, embedding_next_attempt_at = ?,
+          embedding_lease_expires_at = NULL, embedding_last_error_code = ?
+      WHERE template_id = ? AND embedding_status = 'processing'
+    `).run(retryAt === null ? 'failed' : 'pending', retryAt, errorCode, templateId)
+  }
+
+  refreshPendingSlideClassification(templateId: string, pending: PendingSlideClassification) {
+    const result = this.#database.prepare(`
+      UPDATE slide_classifications
+      SET status = 'pending', input_fingerprint = ?, schema_version = ?, prompt_version = ?,
+          attempt_count = 0, next_attempt_at = NULL, lease_expires_at = NULL, last_error_code = NULL
+      WHERE template_id = ? AND input_fingerprint <> ?
+    `).run(
+      pending.inputFingerprint,
+      pending.schemaVersion,
+      pending.promptVersion,
+      templateId,
+      pending.inputFingerprint,
+    )
+    return result.changes === 1
+  }
+
+  refreshPendingSlideEmbedding(
+    templateId: string,
+    subjectDocument: string,
+    subjectFingerprint: string,
+    capabilityDocument: string,
+    capabilityFingerprint: string,
+  ) {
+    const result = this.#database.prepare(`
+      UPDATE slide_classifications
+      SET embedding_status = 'pending', subject_embedding_document = ?,
+          subject_embedding_fingerprint = ?, capability_embedding_document = ?,
+          capability_embedding_fingerprint = ?, subject_embedding = NULL,
+          capability_embedding = NULL,
+          embedding_attempt_count = 0, embedding_next_attempt_at = NULL,
+          embedding_lease_expires_at = NULL, embedding_last_error_code = NULL
+      WHERE template_id = ? AND metadata_json IS NOT NULL
+        AND (
+          subject_embedding_fingerprint IS NULL OR subject_embedding_fingerprint <> ?
+          OR capability_embedding_fingerprint IS NULL OR capability_embedding_fingerprint <> ?
+        )
+    `).run(
+      subjectDocument,
+      subjectFingerprint,
+      capabilityDocument,
+      capabilityFingerprint,
+      templateId,
+      subjectFingerprint,
+      capabilityFingerprint,
+    )
+    return result.changes === 1
+  }
+
+  listRetrievalClassifications(appId: string): RetrievalClassificationRecord[] {
+    const rows = this.#database.prepare(`
+      SELECT
+        slide_classifications.*,
+        templates.template_json,
+        template_metadata.kind,
+        template_metadata.created_at,
+        CASE WHEN template_previews.template_id IS NULL THEN 0 ELSE 1 END AS preview_available
+      FROM slide_classifications
+      JOIN templates USING (template_id)
+      JOIN template_metadata USING (template_id)
+      JOIN app_templates USING (template_id)
+      LEFT JOIN template_previews USING (template_id)
+      WHERE app_templates.app_id = ?
+        AND slide_classifications.metadata_json IS NOT NULL
+        AND slide_classifications.schema_version = 2
+      ORDER BY template_metadata.created_at DESC, slide_classifications.template_id
+    `).all(appId) as RetrievalRow[]
+    return rows.map((row) => {
+      const template = JSON.parse(row.template_json) as PowerPointCanvasJson
+      return {
+        classification: mapClassificationRow(row),
+        createdAt: row.created_at,
+        kind: row.kind,
+        previewAvailable: row.preview_available === 1,
+        templateId: row.template_id,
+        title: template.presentation.title,
+      }
+    })
+  }
+
+  searchSlideClassifications(appId: string, ftsQuery: string, limit: number): string[] {
+    const rows = this.#database.prepare(`
+      SELECT slide_classifications_fts.template_id
+      FROM slide_classifications_fts
+      JOIN app_templates ON app_templates.template_id = slide_classifications_fts.template_id
+      JOIN slide_classifications ON slide_classifications.template_id = slide_classifications_fts.template_id
+      WHERE app_templates.app_id = ?
+        AND slide_classifications.metadata_json IS NOT NULL
+        AND slide_classifications.schema_version = 2
+        AND slide_classifications_fts MATCH ?
+      ORDER BY bm25(slide_classifications_fts, 0.0, 2.0, 5.0, 5.0, 5.0, 2.0, 2.0, 3.0, 3.0, 4.0, 3.0, 1.0, 4.0, 4.0, 2.0, 3.0),
+        slide_classifications_fts.template_id
+      LIMIT ?
+    `).all(appId, ftsQuery, limit) as Array<{ template_id: string }>
+    return rows.map((row) => row.template_id)
+  }
+
+  #replaceFtsRow(templateId: string, metadata: ReturnType<typeof normalizeSlideRetrievalMetadata>) {
+    const templateRow = this.#database.prepare(`
+      SELECT template_json FROM templates WHERE template_id = ?
+    `).get(templateId) as { template_json: string } | undefined
+    if (!templateRow) throw new Error('The classified template no longer exists.')
+    const template = JSON.parse(templateRow.template_json) as PowerPointCanvasJson
+    this.#database.prepare('DELETE FROM slide_classifications_fts WHERE template_id = ?').run(templateId)
+    this.#database.prepare(`
+      INSERT INTO slide_classifications_fts (
+        template_id, title, subject_summary, domains, topics, technologies, entities,
+        claims, synonyms, intents, information_types, audience, archetype, content_slots,
+        visual_structure, retrieval_keywords
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      templateId,
+      template.presentation.title,
+      metadata.subject.summary,
+      metadata.subject.domains.map((domain) => domain.id).join(' '),
+      [
+        ...metadata.subject.domains.flatMap((domain) => domain.topics),
+        ...metadata.subject.other_topics,
+      ].join(' '),
+      metadata.subject.technologies.join(' '),
+      metadata.subject.entities.join(' '),
+      metadata.subject.claims.join(' '),
+      metadata.subject.synonyms.join(' '),
+      metadata.communication.intents.join(' '),
+      metadata.communication.information_types.join(' '),
+      metadata.communication.audience.join(' '),
+      metadata.template_fit.archetype,
+      metadata.template_fit.content_slots.map((slot) => `${slot.role} ${slot.capacity}`).join(' '),
+      [metadata.visual.layout_type, ...metadata.visual.visual_elements, ...metadata.visual.structural_features].join(' '),
+      metadata.retrieval_keywords.join(' '),
+    )
+  }
+
   delete(templateId: string, appId: string = DEFAULT_APP_ID) {
     this.#database.exec('BEGIN IMMEDIATE')
     try {
       const result = this.#database.prepare(`
         DELETE FROM app_templates WHERE app_id = ? AND template_id = ?
       `).run(appId, templateId)
+      this.#database.prepare(`
+        DELETE FROM slide_classifications_fts
+        WHERE template_id = ?
+          AND NOT EXISTS (SELECT 1 FROM app_templates WHERE template_id = ?)
+      `).run(templateId, templateId)
       this.#database.prepare(`
         DELETE FROM templates
         WHERE template_id = ?
@@ -657,6 +1263,42 @@ export class SqliteTemplateRepository implements TemplateRepository {
           metadata: parseAppMetadata(row.metadata_json),
         }
       : undefined
+  }
+}
+
+function mapClassificationRow(row: ClassificationRow): StoredSlideClassification {
+  const metadata = row.metadata_json === null
+    ? null
+    : normalizeSlideRetrievalMetadata(JSON.parse(row.metadata_json) as unknown)
+  return {
+    attemptCount: row.attempt_count,
+    classifiedAt: row.classified_at,
+    classifiedFingerprint: row.classified_fingerprint,
+    embeddingAttemptCount: row.embedding_attempt_count,
+    embeddingDimensions: row.embedding_dimensions,
+    capabilityEmbeddingDocument: row.capability_embedding_document,
+    capabilityEmbeddingFingerprint: row.capability_embedding_fingerprint,
+    capabilityVector: row.capability_embedding === null || row.embedding_dimensions === null
+      ? null
+      : deserializeEmbedding(row.capability_embedding, row.embedding_dimensions),
+    embeddingLastErrorCode: row.embedding_last_error_code,
+    embeddingModel: row.embedding_model,
+    embeddingNextAttemptAt: row.embedding_next_attempt_at,
+    embeddingStatus: row.embedding_status,
+    inputFingerprint: row.input_fingerprint,
+    lastErrorCode: row.last_error_code,
+    metadata,
+    model: row.model,
+    nextAttemptAt: row.next_attempt_at,
+    promptVersion: row.prompt_version,
+    schemaVersion: row.schema_version,
+    status: row.status,
+    templateId: row.template_id,
+    subjectEmbeddingDocument: row.subject_embedding_document,
+    subjectEmbeddingFingerprint: row.subject_embedding_fingerprint,
+    subjectVector: row.subject_embedding === null || row.embedding_dimensions === null
+      ? null
+      : deserializeEmbedding(row.subject_embedding, row.embedding_dimensions),
   }
 }
 

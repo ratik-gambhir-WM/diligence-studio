@@ -1,28 +1,19 @@
-import { execFile } from 'node:child_process'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import path from 'node:path'
-import { promisify } from 'node:util'
-
 import JSZip from 'jszip'
 import PptxGenJS from 'pptxgenjs'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it } from 'vitest'
 
-import { importPowerPoint } from '../src/lib/import/PowerpointImporter'
+import { buildThemedPptxBytes } from '../src/lib/export/PowerpointGenerator'
+import { importPowerPointBytes } from '../src/lib/import/PowerpointImporter'
 import type {
   PowerPointCanvasElement,
   PowerPointCanvasShapeElement,
   PowerPointCanvasTextElement,
 } from '../src/lib/import/PowerpointImportTypes'
+import { normalizePresentationSpec } from '../src/lib/shared/PowerpointNormalizer'
 
-const execFileAsync = promisify(execFile)
-let testDir = ''
-let sourcePath = ''
+let source: Buffer<ArrayBufferLike> = Buffer.alloc(0)
 
 beforeAll(async () => {
-  testDir = await mkdtemp(path.join(tmpdir(), 'diligence-studio-pptx-import-'))
-  sourcePath = path.join(testDir, 'source.pptx')
-
   const pptx = new PptxGenJS()
   pptx.layout = 'LAYOUT_WIDE'
   const first = pptx.addSlide()
@@ -107,11 +98,11 @@ beforeAll(async () => {
       valign: 'middle',
     },
   )
-  await pptx.writeFile({ fileName: sourcePath })
+  const generated = await pptx.write({ outputType: 'nodebuffer', compression: true })
 
   // PowerPoint commonly stores content-driven rows as h="0". Reproduce that
   // OOXML rather than relying on PptxGenJS's equal-height row defaults.
-  const zip = await JSZip.loadAsync(await readFile(sourcePath))
+  const zip = await JSZip.loadAsync(generated)
   const tableSlidePath = 'ppt/slides/slide3.xml'
   const tableSlide = await zip.file(tableSlidePath)?.async('text')
   if (!tableSlide) {
@@ -123,21 +114,27 @@ beforeAll(async () => {
     return rowIndex === 1 ? match : '<a:tr h="0">'
   })
   zip.file(tableSlidePath, autoSizedRows)
-  await writeFile(sourcePath, await zip.generateAsync({ type: 'nodebuffer' }))
+  source = await zip.generateAsync({ type: 'nodebuffer' })
 })
 
-afterAll(async () => {
-  if (testDir) {
-    await rm(testDir, { force: true, recursive: true })
-  }
-})
+describe('in-memory PowerPoint XML to TemplateCanvas JSON import', () => {
+  it('accepts PowerPoint bytes and keeps image bytes embedded', async () => {
+    const result = await importPowerPointBytes(source, {
+      sourceName: 'source.pptx',
+      slide: 2,
+    })
 
-describe('PowerPoint XML to TemplateCanvas JSON script', () => {
+    expect(result).toMatchObject({ importedSlideCount: 1, sourceSlideCount: 3 })
+    expect(result.jsonSpec.presentation.slides[0]?.elements).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ src: expect.stringMatching(/^data:image\/png;base64,/u) }),
+      ]),
+    )
+  })
+
   it('emits a selected slide in the native template.jsonSpec contract', async () => {
-    const outputPath = path.join(testDir, 'selected.canvas.json')
-    const result = await importPowerPoint({
-      inputPath: sourcePath,
-      outputPath,
+    const result = await importPowerPointBytes(source, {
+      sourceName: 'source.pptx',
       slide: 2,
     })
     const json = result.jsonSpec as {
@@ -152,13 +149,7 @@ describe('PowerPoint XML to TemplateCanvas JSON script', () => {
       }
     }
 
-    expect(result).toMatchObject({
-      inputPath: sourcePath,
-      outputPath,
-      sourceSlideCount: 3,
-      importedSlideCount: 1,
-    })
-    expect(JSON.parse(await readFile(outputPath, 'utf8'))).toEqual(result.jsonSpec)
+    expect(result).toMatchObject({ sourceSlideCount: 3, importedSlideCount: 1 })
 
     expect(json.presentation).toMatchObject({
       preserveElementOrder: true,
@@ -207,32 +198,12 @@ describe('PowerPoint XML to TemplateCanvas JSON script', () => {
       }),
     ])
 
-    const roundTripPptxPath = path.join(testDir, 'round-trip.pptx')
-    const roundTripJsonPath = path.join(testDir, 'round-trip.canvas.json')
-    await execFileAsync(
-      process.execPath,
-      [
-        '--import',
-        'tsx',
-        path.join(process.cwd(), 'scripts/generate-pptx-from-json.ts'),
-        outputPath,
-        roundTripPptxPath,
-      ],
-      { cwd: process.cwd() },
-    )
-    await execFileAsync(
-      process.execPath,
-      [
-        '--import',
-        'tsx',
-        path.join(process.cwd(), 'scripts/parse-pptx.ts'),
-        roundTripPptxPath,
-        roundTripJsonPath,
-      ],
-      { cwd: process.cwd() },
-    )
-
-    const roundTripJson = JSON.parse(await readFile(roundTripJsonPath, 'utf8')) as typeof json
+    const normalized = normalizePresentationSpec(result.jsonSpec).presentation
+    if (!normalized) throw new Error('The imported fixture did not normalize for round-trip export.')
+    const roundTripPptx = await buildThemedPptxBytes(normalized)
+    const roundTripJson = (await importPowerPointBytes(Buffer.from(roundTripPptx), {
+      sourceName: 'round-trip.pptx',
+    })).jsonSpec as typeof json
     expect(roundTripJson.presentation.slides[0].elements).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -255,9 +226,7 @@ describe('PowerPoint XML to TemplateCanvas JSON script', () => {
   })
 
   it('keeps top-level typography distinct from shapes inside groups', async () => {
-    const groupedSourcePath = path.join(testDir, 'grouped-source.pptx')
-    const outputPath = path.join(testDir, 'grouped-paths.canvas.json')
-    const zip = await JSZip.loadAsync(await readFile(sourcePath))
+    const zip = await JSZip.loadAsync(source)
     const titleSlidePath = 'ppt/slides/slide2.xml'
     const titleSlide = await zip.file(titleSlidePath)?.async('text')
     if (!titleSlide) {
@@ -267,11 +236,9 @@ describe('PowerPoint XML to TemplateCanvas JSON script', () => {
       titleSlidePath,
       titleSlide.replace('</p:spTree>', `${GROUP_WITH_CONFLICTING_LOCAL_PATH_XML}</p:spTree>`),
     )
-    await writeFile(groupedSourcePath, await zip.generateAsync({ type: 'nodebuffer' }))
-
-    const result = await importPowerPoint({
-      inputPath: groupedSourcePath,
-      outputPath,
+    const groupedSource = await zip.generateAsync({ type: 'nodebuffer' })
+    const result = await importPowerPointBytes(groupedSource, {
+      sourceName: 'grouped-source.pptx',
       slide: 2,
     })
     const elements = result.jsonSpec.presentation.slides[0]?.elements ?? []
@@ -298,22 +265,10 @@ describe('PowerPoint XML to TemplateCanvas JSON script', () => {
   })
 
   it('distributes PowerPoint auto-sized table rows by their rendered text height', async () => {
-    const outputPath = path.join(testDir, 'table.canvas.json')
-    await execFileAsync(
-      process.execPath,
-      [
-        '--import',
-        'tsx',
-        path.join(process.cwd(), 'scripts/parse-pptx.ts'),
-        sourcePath,
-        outputPath,
-        '--slide',
-        '3',
-      ],
-      { cwd: process.cwd() },
-    )
-
-    const json = JSON.parse(await readFile(outputPath, 'utf8')) as {
+    const json = (await importPowerPointBytes(source, {
+      sourceName: 'source.pptx',
+      slide: 3,
+    })).jsonSpec as {
       presentation: {
         slides: Array<{
           elements: PowerPointCanvasElement[]

@@ -1,21 +1,32 @@
 import { createServer } from 'node:http'
 
+import OpenAI from 'openai'
+
 import { writeApiLogToConsole } from './apiLogging'
 import { createApp } from './app'
 import { seedBuiltinTemplates } from './catalog/seedBuiltinTemplates'
 import { loadServerConfig } from './config'
+import { OpenAISlideClassifier } from './integrations/OpenAISlideClassifier'
+import { OpenAISlideEmbedder } from './integrations/OpenAISlideEmbedder'
 import { SqliteTemplateRepository } from './repositories/SqliteTemplateRepository'
 import { ExportService } from './services/ExportPowerPointService'
 import { ImportService } from './services/ImportTemplateService'
+import { SlideClassificationService } from './services/SlideClassificationService'
+// The background SlideClassificationWorker is intentionally disabled. Import v2 owns the
+// classification and embedding pipeline synchronously so it cannot return pending retrieval data.
 import { LibraryPowerPointConverter } from './services/PowerPointConverter'
-import {
-  DisabledTemplatePreviewGenerator,
-  HeadlessTemplatePreviewGenerator,
-  QuickLookTemplatePreviewGenerator,
-} from './services/TemplatePreview'
+import { QuarryTemplatePreviewGenerator } from './services/TemplatePreview'
+
+try {
+  process.loadEnvFile(new URL('../.env', import.meta.url))
+} catch (error) {
+  if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) {
+    throw error
+  }
+}
 
 const config = loadServerConfig()
-const templates = new SqliteTemplateRepository(config.databasePath)
+const templates = new SqliteTemplateRepository()
 await seedBuiltinTemplates(templates)
 const exportService = new ExportService(templates)
 const previewOptions = {
@@ -23,20 +34,50 @@ const previewOptions = {
   renderSize: config.previewRenderSize,
   timeoutMs: config.previewTimeoutMs,
 }
-const previewGenerator = config.previewProvider === 'headless'
-  ? new HeadlessTemplatePreviewGenerator({
-      ...previewOptions,
-      renderUrl: config.previewRenderUrl,
-    })
-  : config.previewProvider === 'quicklook'
-    ? new QuickLookTemplatePreviewGenerator(previewOptions)
-    : new DisabledTemplatePreviewGenerator()
+const previewGenerator = new QuarryTemplatePreviewGenerator({
+  ...previewOptions,
+  renderUrl: config.quarryPreviewRenderUrl,
+})
+let classificationService: SlideClassificationService | undefined
+
+if (
+  config.slideClassificationProvider === 'openai'
+  && config.openaiApiKey
+  && config.openaiSlideClassificationModel
+  && config.openaiSlideEmbeddingModel
+) {
+  const openai = new OpenAI({ apiKey: config.openaiApiKey, maxRetries: 0 })
+  classificationService = new SlideClassificationService({
+    classificationModel: config.openaiSlideClassificationModel,
+    classifier: new OpenAISlideClassifier({
+      client: openai,
+      model: config.openaiSlideClassificationModel,
+      timeoutMs: config.slideClassificationTimeoutMs,
+    }),
+    embedder: new OpenAISlideEmbedder({
+      client: openai,
+      dimensions: config.openaiSlideEmbeddingDimensions,
+      maxInputBytes: config.slideEmbeddingMaxTextBytes,
+      model: config.openaiSlideEmbeddingModel,
+      timeoutMs: config.slideEmbeddingTimeoutMs,
+    }),
+    embeddingDimensions: config.openaiSlideEmbeddingDimensions,
+    embeddingMaxTextBytes: config.slideEmbeddingMaxTextBytes,
+    embeddingModel: config.openaiSlideEmbeddingModel,
+    inputLimits: {
+      maxPreviewBytes: config.slideClassificationMaxImageBytes,
+      maxTextChars: config.slideClassificationMaxTextChars,
+    },
+    repository: templates,
+  })
+}
 const importService = new ImportService(
   new LibraryPowerPointConverter(),
   templates,
   undefined,
   undefined,
   previewGenerator,
+  classificationService,
 )
 const server = createServer(createApp({
   exportService,
@@ -49,7 +90,7 @@ const server = createServer(createApp({
 
 server.listen(config.port, config.host, () => {
   console.log(
-    `PowerPoint API listening at ${config.host}:${config.port}; template previews: ${config.previewProvider}.`,
+    `PowerPoint API listening at ${config.host}:${config.port}; template previews: quarry; slide classification: ${config.slideClassificationProvider}${config.openaiSlideClassificationModel ? ` (${config.openaiSlideClassificationModel}, synchronous)` : ''}.`,
   )
 })
 

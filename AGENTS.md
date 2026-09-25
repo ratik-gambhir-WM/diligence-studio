@@ -231,9 +231,8 @@ npm run typecheck
 npm run build
 ```
 
-Run a CLI smoke test only with a disposable input and explicit temporary output. `pptx:to-json`
-writes files, and other scripts may create assets beside their output. Never aim a verification run
-at valuable source decks or user output directories.
+Run CLI smoke tests by piping disposable bytes through stdin and capturing stdout in memory. Server
+PowerPoint scripts must not accept filesystem paths or create JSON, PPTX, preview, or asset files.
 
 ### Express
 

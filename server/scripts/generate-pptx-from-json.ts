@@ -1,28 +1,17 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import path from 'node:path'
 import {
   buildThemedPptxBytes,
-  buildSuggestedFileName,
   normalizePresentationSpec,
 } from '../src/lib/export/PowerpointGenerator'
-import type { JsonValue, ThrownValue } from '../src/lib/shared/PowerpointTypes'
+import type { ThrownValue } from '../src/lib/shared/PowerpointTypes'
+import { readStdin, writeStdout } from './stdio'
 
 async function main() {
-  const [, , inputArg, outputArg] = process.argv
-
-  if (!inputArg) {
-    throw new Error(
-      'Usage: npm run generate:pptx -- <path-to-json> [output-path-or-directory]',
-    )
+  if (process.argv.length > 2) {
+    throw new Error('This command accepts presentation JSON on stdin and returns PPTX bytes on stdout.')
   }
 
-  const inputPath = path.resolve(process.cwd(), inputArg)
-  const raw = await readFile(inputPath, 'utf8')
-  const parsed = JSON.parse(raw) as JsonValue
-  const { presentation, issues } = normalizePresentationSpec(parsed, {
-    baseDir: path.dirname(inputPath),
-  })
-
+  const raw = await readStdin(50 * 1024 * 1024)
+  const { presentation, issues } = normalizePresentationSpec(JSON.parse(raw.toString('utf8')))
   const errors = issues.filter((issue) => issue.level === 'error')
   if (!presentation || errors.length > 0) {
     const formattedIssues = issues
@@ -32,29 +21,10 @@ async function main() {
   }
 
   for (const issue of issues.filter((issue) => issue.level === 'warning')) {
-    console.warn(`WARNING ${issue.path}: ${issue.message}`)
+    console.error(`WARNING ${issue.path}: ${issue.message}`)
   }
 
-  const defaultFileName = buildSuggestedFileName(presentation)
-  const outputPath = resolveOutputPath(inputPath, outputArg, defaultFileName)
-  await mkdir(path.dirname(outputPath), { recursive: true })
-
-  await writeFile(outputPath, await buildThemedPptxBytes(presentation))
-
-  console.log(outputPath)
-}
-
-function resolveOutputPath(inputPath: string, outputArg: string | undefined, defaultFileName: string) {
-  if (!outputArg) {
-    return path.join(path.dirname(inputPath), defaultFileName)
-  }
-
-  const resolved = path.resolve(process.cwd(), outputArg)
-  if (path.extname(resolved).toLowerCase() === '.pptx') {
-    return resolved
-  }
-
-  return path.join(resolved, defaultFileName)
+  writeStdout(Buffer.from(await buildThemedPptxBytes(presentation)))
 }
 
 main().catch((error: ThrownValue) => {

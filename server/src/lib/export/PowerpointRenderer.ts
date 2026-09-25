@@ -26,8 +26,8 @@ import {
   toPptxVerticalAlign,
 } from './PowerpointUtils'
 import { getConnectorAwareElementOrder } from '../shared/PowerpointLayering'
+import { WEST_MONROE_LOGO_DATA } from './WestMonroeLogo'
 
-const WEST_MONROE_LOGO_IMAGE_PATH = new URL('../../../assets/element-5.png', import.meta.url).pathname
 // PptxGenJS writes arbitrary OOXML preset names correctly, but its public enum omits connectors.
 const PPTX_ELBOW_CONNECTOR_SHAPE = 'bentConnector2' as PptxGenJS.ShapeType
 const PPTX_STRAIGHT_CONNECTOR_SHAPE = 'line' as PptxGenJS.ShapeType
@@ -81,7 +81,7 @@ export function buildPptxPresentation(presentation: NormalizedPresentation) {
         })),
         {
           image: {
-            path: WEST_MONROE_LOGO_IMAGE_PATH,
+            data: WEST_MONROE_LOGO_DATA,
             x: pxToInches(brandFrame.logo.x),
             y: pxToInches(brandFrame.logo.y),
             w: pxToInches(brandFrame.logo.w),
@@ -292,16 +292,13 @@ function buildImageOptions(element: NormalizedImageElement) {
       : undefined,
   }
 
-  if (element.src.startsWith('data:')) {
-    return {
-      ...base,
-      data: element.src,
-    }
+  if (!element.src.startsWith('data:')) {
+    throw new Error('PowerPoint image sources must be embedded data URIs.')
   }
 
   return {
     ...base,
-    path: element.src,
+    data: element.src,
   }
 }
 

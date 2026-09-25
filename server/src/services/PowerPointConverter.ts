@@ -1,8 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import path from 'node:path'
-
-import { importPowerPoint } from '../lib/import/PowerpointImporter'
+import { importPowerPointBytes } from '../lib/import/PowerpointImporter'
 import type { PowerPointCanvasJson } from '../lib/import/PowerpointImportTypes'
 import { ApiError } from '../errors'
 
@@ -30,39 +26,20 @@ export type PowerPointConversion = {
 }
 
 export interface PowerPointConverter {
-  convertFile(inputPath: string, outputPath: string): Promise<PowerPointConversion>
+  convert(source: Buffer): Promise<PowerPointConversion>
 }
 
 export class LibraryPowerPointConverter implements PowerPointConverter {
-  async convertFile(inputPath: string, outputPath: string): Promise<PowerPointConversion> {
-    const source = await readFile(inputPath)
-    validatePowerPointPackage(source)
-    const result = await runImporter(inputPath, outputPath)
-    return { templateJson: result.jsonSpec, warnings: result.warnings }
-  }
-
   async convert(source: Buffer): Promise<PowerPointConversion> {
     validatePowerPointPackage(source)
-    const workingDirectory = await mkdtemp(path.join(tmpdir(), 'diligence-studio-import-'))
-    const inputPath = path.join(workingDirectory, 'upload.pptx')
-    const outputPath = path.join(workingDirectory, 'upload.canvas.json')
-
-    try {
-      await writeFile(inputPath, source)
-      return await this.convertFile(inputPath, outputPath)
-    } finally {
-      await rm(workingDirectory, { force: true, recursive: true })
-    }
+    const result = await runImporter(source)
+    return { templateJson: result.jsonSpec, warnings: result.warnings }
   }
 }
 
-async function runImporter(inputPath: string, outputPath: string) {
+async function runImporter(source: Buffer) {
   try {
-    return await importPowerPoint({
-      embedAssets: true,
-      inputPath,
-      outputPath,
-    })
+    return await importPowerPointBytes(source)
   } catch (error) {
     throw new ApiError(
       422,

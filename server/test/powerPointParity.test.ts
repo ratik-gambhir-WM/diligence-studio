@@ -242,7 +242,7 @@ describe('Rust PowerPoint parity', () => {
       fontSize: 12,
     })
 
-    const templates = new SqliteTemplateRepository(':memory:')
+    const templates = new SqliteTemplateRepository()
     try {
       const exported = await new ExportPowerPointService(templates).export(imported.templateJson)
       const roundTrip = await converter.convert(Buffer.from(exported.bytes))
@@ -321,7 +321,7 @@ describe('Rust PowerPoint parity', () => {
       }),
     ])
 
-    const templates = new SqliteTemplateRepository(':memory:')
+    const templates = new SqliteTemplateRepository()
     try {
       const exported = await new ExportPowerPointService(templates).export(imported.templateJson)
       const archive = await JSZip.loadAsync(exported.bytes)
@@ -362,7 +362,7 @@ describe('Rust PowerPoint parity', () => {
         }],
       },
     })
-    const templates = new SqliteTemplateRepository(':memory:')
+    const templates = new SqliteTemplateRepository()
 
     try {
       const exported = await new ExportPowerPointService(templates).export(normalized.templateJson)

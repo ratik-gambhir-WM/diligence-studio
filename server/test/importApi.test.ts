@@ -19,7 +19,7 @@ const ONE_PIXEL_PNG =
 let templates: SqliteTemplateRepository
 
 beforeEach(() => {
-  templates = new SqliteTemplateRepository(':memory:')
+  templates = new SqliteTemplateRepository()
 })
 
 afterEach(() => {
@@ -28,13 +28,20 @@ afterEach(() => {
 
 describe('import API', () => {
   it('registers apps and keeps imported templates scoped to their app ID', async () => {
+    const source = Buffer.from('staged PowerPoint bytes')
     const importService = new ImportTemplateService(
       {
-        convertFile: async () => ({ templateJson: createLegacyTemplate(), warnings: [] }),
+        convert: async (receivedSource) => {
+          expect(receivedSource).toEqual(source)
+          return { templateJson: createLegacyTemplate(), warnings: [] }
+        },
       },
       templates,
       () => 'tenant-template',
       () => 'tenant-asset',
+      {
+        generate: async () => undefined,
+      },
     )
     const app = createTestApp(importService, 1024)
 
@@ -42,7 +49,7 @@ describe('import API', () => {
       .post('/api/v1/import')
       .set('Content-Type', POWERPOINT_CONTENT_TYPE)
       .set('X-App-Id', 'app-one')
-      .send(Buffer.from('staged PowerPoint bytes'))
+      .send(source)
       .expect(201)
 
     expect(templates.findApp('app-one')).toMatchObject({
@@ -170,7 +177,7 @@ describe('import API', () => {
   it('rolls back the complete batch when one SQLite insert fails', async () => {
     const importService = new ImportTemplateService(
       {
-        convertFile: async () => ({ templateJson: createBatchTemplate(), warnings: [] }),
+        convert: async () => ({ templateJson: createBatchTemplate(), warnings: [] }),
       },
       templates,
       () => 'duplicate-template-id',
@@ -560,7 +567,7 @@ describe('import API', () => {
     let previewWasAborted = false
     const importService = new ImportTemplateService(
       {
-        convertFile: async () => ({ templateJson: createLegacyTemplate(), warnings: [] }),
+        convert: async () => ({ templateJson: createLegacyTemplate(), warnings: [] }),
       },
       templates,
       () => 'timed-out-template',
